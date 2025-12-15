@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import time
 from typing import List, Dict, Any, Optional
+import psutil
 
 from openai import OpenAI
 from pydub import AudioSegment
@@ -50,6 +51,11 @@ class AudioProcessor:
         print(f"All {max_retries} attempts failed for {file_path}")
         raise last_exception
 
+    def _log_memory_usage(self, tag: str = ""):
+        process = psutil.Process(os.getpid())
+        mem_info = process.memory_info()
+        print(f"[Memory Usage] {tag}: RSS={mem_info.rss / 1024 / 1024:.2f} MB")
+
     def process_large_file(self, file_path: str) -> List[Any]:
         """
         Splits a large file on silence and transcribes chunks sequentially.
@@ -59,8 +65,13 @@ class AudioProcessor:
         total_duration_offset = 0.0
 
         try:
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            print(f"Processing large audio file: {file_path} (Size: {file_size_mb:.2f} MB)")
+            self._log_memory_usage("Before loading audio")
+
             print(f"Loading large audio file: {file_path}")
             audio = AudioSegment.from_file(file_path)
+            self._log_memory_usage("After loading audio")
 
             # 1. Split on silence
             # min_silence_len: minimum length of silence to be considered a split point (ms)
@@ -76,6 +87,7 @@ class AudioProcessor:
                 keep_silence=500,
                 seek_step=100
             )
+            self._log_memory_usage("After splitting audio")
 
             if not segments_audio:
                 # If no silence found, fall back to simple chunking or just one chunk
