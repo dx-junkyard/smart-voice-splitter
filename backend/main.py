@@ -1,14 +1,17 @@
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import shutil
 import os
 import uuid
+from datetime import datetime
 from database import engine, Base, get_db
 import models, schemas
 from services.audio_processor import AudioProcessor
 
 # Create tables
+# Note: create_all only creates tables that don't exist.
+# It does NOT handle schema migrations (like adding columns).
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
@@ -34,11 +37,30 @@ except Exception as e:
     audio_processor = None
 
 @app.post("/upload", response_model=schemas.Recording)
-def upload_audio(file: UploadFile = File(...), db: Session = Depends(get_db)):
+def upload_audio(
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    recorded_at: datetime = Form(...),
+    summary: str = Form(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Uploads an audio file and creates a Profile for it.
+    """
     if not audio_processor:
         raise HTTPException(status_code=500, detail="Audio Processor not initialized. Check server logs.")
 
-    # 1. Save file
+    # 1. Create Profile
+    new_profile = models.Profile(
+        title=title,
+        recorded_at=recorded_at,
+        summary=summary
+    )
+    db.add(new_profile)
+    db.commit()
+    db.refresh(new_profile)
+
+    # 2. Save file
     file_extension = os.path.splitext(file.filename)[1]
     filename = f"{uuid.uuid4()}{file_extension}"
     file_path = os.path.join(UPLOAD_DIR, filename)
@@ -47,11 +69,14 @@ def upload_audio(file: UploadFile = File(...), db: Session = Depends(get_db)):
         shutil.copyfileobj(file.file, buffer)
 
     try:
-        # 2. Process audio
+        # 3. Process audio
         chunks_data = audio_processor.process(file_path)
 
-        # 3. Save to DB
-        recording = models.Recording(file_path=file_path)
+        # 4. Save to DB (Recording) linked to Profile
+        recording = models.Recording(
+            file_path=file_path,
+            profile_id=new_profile.id
+        )
         db.add(recording)
         db.commit()
         db.refresh(recording)
@@ -72,8 +97,22 @@ def upload_audio(file: UploadFile = File(...), db: Session = Depends(get_db)):
         return recording
 
     except Exception as e:
+        # Clean up profile if processing fails?
+        # For now, we keep the profile but maybe we should delete it.
+        # But maybe the user wants to retry upload for same profile?
+        # Given the API design "Upload creates Profile", failure suggests rollback.
         print(f"Error processing audio: {e}")
+        # Rollback would be good but file is already saved.
+        # We leave it as is for now or delete profile?
+        # Deleting profile might be safer to avoid empty profiles.
+        db.delete(new_profile)
+        db.commit()
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/profiles", response_model=list[schemas.Profile])
+def read_profiles(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    profiles = db.query(models.Profile).offset(skip).limit(limit).all()
+    return profiles
 
 @app.get("/recordings", response_model=list[schemas.Recording])
 def read_recordings(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
