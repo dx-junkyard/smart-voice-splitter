@@ -105,7 +105,9 @@ class AudioProcessor:
                 if len(current_chunk) + len(seg) < self.CHUNK_TARGET_DURATION_MS:
                     current_chunk += seg
                 else:
-                    chunks_to_process.append(current_chunk)
+                    # チャンクが空でない場合のみリストに追加する
+                    if len(current_chunk) > 0:
+                        chunks_to_process.append(current_chunk)
                     current_chunk = seg
 
             if len(current_chunk) > 0:
@@ -118,10 +120,18 @@ class AudioProcessor:
                 chunk_filename = os.path.join(temp_dir, f"chunk_{i}.mp3")
                 print(f"Exporting chunk {i} to {chunk_filename}")
                 # Export as mp3 to save space/bandwidth
-                chunk_audio.export(chunk_filename, format="mp3")
+                # Use standard bitrate and mono to ensure compatibility with Whisper API
+                chunk_audio.export(chunk_filename, format="mp3", bitrate="128k", parameters=["-ac", "1"])
+
+                chunk_size = os.path.getsize(chunk_filename)
+                print(f"Chunk {i} size: {chunk_size / (1024*1024):.2f} MB")
+
+                if chunk_size == 0:
+                    print(f"Error: Chunk {i} is empty (0 bytes). Skipping transcription for this chunk.")
+                    continue
 
                 # Check size just in case
-                if os.path.getsize(chunk_filename) > 25 * 1024 * 1024:
+                if chunk_size > 25 * 1024 * 1024:
                     print(f"Warning: Chunk {i} is larger than 25MB even after splitting.")
                     # In a real robust system, we would force-split this chunk further.
 
