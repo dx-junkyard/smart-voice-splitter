@@ -105,7 +105,8 @@ class AudioProcessor:
                 if len(current_chunk) + len(seg) < self.CHUNK_TARGET_DURATION_MS:
                     current_chunk += seg
                 else:
-                    chunks_to_process.append(current_chunk)
+                    if len(current_chunk) > 0:
+                        chunks_to_process.append(current_chunk)
                     current_chunk = seg
 
             if len(current_chunk) > 0:
