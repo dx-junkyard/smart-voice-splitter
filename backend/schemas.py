@@ -8,6 +8,7 @@ class ChunkBase(BaseModel):
     transcript: str
     start_time: float
     end_time: float
+    file_path: Optional[str] = None
     user_note: Optional[str] = None
 
 class ChunkCreate(ChunkBase):
@@ -16,6 +17,7 @@ class ChunkCreate(ChunkBase):
 class Chunk(ChunkBase):
     id: int
     recording_id: int
+    file_path: Optional[str]
     is_bookmarked: bool
 
     class Config:
