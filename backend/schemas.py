@@ -52,3 +52,6 @@ class Profile(ProfileBase):
 
     class Config:
         from_attributes = True
+
+class ChunkUpdate(BaseModel):
+    user_note: Optional[str] = None
