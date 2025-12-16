@@ -1,5 +1,5 @@
 from fastapi.staticfiles import StaticFiles
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 import shutil
@@ -172,8 +172,64 @@ def delete_profile(profile_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Profile deleted successfully"}
 
+def process_recording_background(recording_id: int):
+    """
+    Background task to process audio without blocking the main thread.
+    Creates its own DB session.
+    """
+    print(f"Starting background processing for recording {recording_id}", flush=True)
+    db = SessionLocal()
+    try:
+        recording = db.query(models.Recording).filter(models.Recording.id == recording_id).first()
+        if not recording:
+            print(f"Recording {recording_id} not found in background task.", flush=True)
+            return
+
+        # Check file existence
+        if not os.path.exists(recording.file_path):
+             print(f"File not found: {recording.file_path}", flush=True)
+             recording.status = "failed"
+             db.commit()
+             return
+
+        # Process
+        chunks_data = audio_processor.process(recording.file_path)
+
+        # Clear old chunks
+        db.query(models.Chunk).filter(models.Chunk.recording_id == recording.id).delete()
+
+        # Save new chunks
+        for chunk_data in chunks_data:
+            chunk = models.Chunk(
+                recording_id=recording.id,
+                title=chunk_data.get("title", "Untitled"),
+                transcript=chunk_data.get("transcript", ""),
+                start_time=chunk_data.get("start_time", 0.0),
+                end_time=chunk_data.get("end_time", 0.0),
+                user_note=chunk_data.get("user_note", None)
+            )
+            db.add(chunk)
+
+        recording.status = "completed"
+        db.commit()
+        print(f"Background processing completed for recording {recording_id}", flush=True)
+
+    except Exception as e:
+        print(f"Error in background processing: {e}", flush=True)
+        try:
+            recording.status = "failed"
+            db.commit()
+        except:
+            pass
+    finally:
+        db.close()
+
 @app.post("/profiles/{profile_id}/retry", response_model=schemas.Recording)
-def retry_processing(profile_id: int, db: Session = Depends(get_db)):
+def retry_processing(
+    profile_id: int, 
+    background_tasks: BackgroundTasks, 
+    db: Session = Depends(get_db)
+):
     """
     Retry processing for a profile's recording if it failed or is incomplete.
     """
@@ -203,42 +259,12 @@ def retry_processing(profile_id: int, db: Session = Depends(get_db)):
     # Reset status
     recording.status = "processing"
     db.commit()
+    db.refresh(recording)
 
-    try:
-        # Check if file exists
-        if not os.path.exists(recording.file_path):
-             recording.status = "failed"
-             db.commit()
-             raise HTTPException(status_code=404, detail="Audio file not found on server.")
+    # Offload to background task
+    background_tasks.add_task(process_recording_background, recording.id)
 
-        # Process
-        chunks_data = audio_processor.process(recording.file_path)
-
-        # Clear existing chunks if any (partial)
-        db.query(models.Chunk).filter(models.Chunk.recording_id == recording.id).delete()
-
-        # Save new chunks
-        for chunk_data in chunks_data:
-            chunk = models.Chunk(
-                recording_id=recording.id,
-                title=chunk_data.get("title", "Untitled"),
-                transcript=chunk_data.get("transcript", ""),
-                start_time=chunk_data.get("start_time", 0.0),
-                end_time=chunk_data.get("end_time", 0.0),
-                user_note=chunk_data.get("user_note", None)
-            )
-            db.add(chunk)
-
-        recording.status = "completed"
-        db.commit()
-        db.refresh(recording)
-        return recording
-
-    except Exception as e:
-        print(f"Error re-processing audio: {e}")
-        recording.status = "failed"
-        db.commit()
-        raise HTTPException(status_code=500, detail=str(e))
+    return recording
 
 # Mount static files to serve audio
 app.mount("/static", StaticFiles(directory=UPLOAD_DIR), name="static")
