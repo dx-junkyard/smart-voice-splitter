@@ -20,6 +20,8 @@ class Recording(Base):
     id = Column(Integer, primary_key=True, index=True)
     profile_id = Column(Integer, ForeignKey("profiles.id"), nullable=False)
     file_path = Column(String, nullable=False)
+    # Status: pending, processing, completed, failed
+    status = Column(String, default="pending")
     created_at = Column(DateTime, default=datetime.utcnow)
 
     profile = relationship("Profile", back_populates="recordings")
@@ -35,5 +37,6 @@ class Chunk(Base):
     start_time = Column(Float, nullable=False)
     end_time = Column(Float, nullable=False)
     user_note = Column(Text, nullable=True)
+    is_bookmarked = Column(Integer, default=False) # storing boolean as 0/1 or boolean type if supported, SQLAlchemy Boolean maps to appropriate type
 
     recording = relationship("Recording", back_populates="chunks")
