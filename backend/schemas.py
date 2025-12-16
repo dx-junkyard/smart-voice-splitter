@@ -16,6 +16,7 @@ class ChunkCreate(ChunkBase):
 class Chunk(ChunkBase):
     id: int
     recording_id: int
+    is_bookmarked: bool
 
     class Config:
         from_attributes = True
@@ -28,10 +29,11 @@ class RecordingCreate(RecordingBase):
     pass
 
 class Recording(RecordingBase):
-    id: int
     profile_id: int
+    file_path: str
+    status: str
     created_at: datetime
-    chunks: List[Chunk] = []
+    chunks: list[Chunk] = []
 
     class Config:
         from_attributes = True
@@ -55,3 +57,4 @@ class Profile(ProfileBase):
 
 class ChunkUpdate(BaseModel):
     user_note: Optional[str] = None
+    is_bookmarked: Optional[bool] = None

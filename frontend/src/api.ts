@@ -14,12 +14,14 @@ export interface Chunk {
   start_time: number;
   end_time: number;
   user_note: string | null;
+  is_bookmarked: boolean;
 }
 
 export interface Recording {
   id: number;
   profile_id: number;
   file_path: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
   created_at: string;
   chunks: Chunk[];
 }
@@ -43,17 +45,26 @@ export const getProfile = async (id: number) => {
   return response.data;
 };
 
-export const updateChunkNote = async (chunkId: number, note: string) => {
-  const response = await api.patch<Chunk>(`/chunks/${chunkId}`, { user_note: note });
+export const updateChunk = async (chunkId: number, updates: { user_note?: string; is_bookmarked?: boolean }) => {
+  const response = await api.patch<Chunk>(`/chunks/${chunkId}`, updates);
   return response.data;
 };
 
 export const uploadFile = async (formData: FormData) => {
-    // Note: ensure the backend URL and endpoint are correct
-    const response = await api.post<Recording>('/upload', formData, {
-        headers: {
-            'Content-Type': 'multipart/form-data',
-        },
-    });
-    return response.data;
+  // Note: ensure the backend URL and endpoint are correct
+  const response = await api.post<Recording>('/upload', formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  });
+  return response.data;
 }
+
+export const deleteProfile = async (id: number) => {
+  await api.delete(`/profiles/${id}`);
+};
+
+export const retryProcessing = async (profileId: number) => {
+  const response = await api.post<Recording>(`/profiles/${profileId}/retry`);
+  return response.data;
+};

@@ -3,22 +3,20 @@ import json
 import shutil
 import tempfile
 import time
+import subprocess
+import re
 from typing import List, Dict, Any, Optional
 import psutil
 
 from openai import OpenAI
-from pydub import AudioSegment
-from pydub.silence import split_on_silence
 
 class AudioProcessor:
     def __init__(self):
         # API key should be in environment variables: OPENAI_API_KEY
         self.client = OpenAI()
-        # Whisper API limit is 25MB. We'll target ~20MB chunks to be safe.
-        # However, pydub works with duration.
-        # MP3 128kbps is approx 1MB per minute. 20MB is ~20 mins.
-        # Let's be conservative: 10 minutes chunks to be safe with various bitrates.
-        self.CHUNK_TARGET_DURATION_MS = 10 * 60 * 1000  # 10 minutes
+        # Whisper API limit is 25MB. We'll target ~10 minute chunks.
+        # 10 mins at 128kbps is ~10MB.
+        self.CHUNK_TARGET_DURATION_SEC = 10 * 60  # 10 minutes
         self.FILE_SIZE_LIMIT_BYTES = 20 * 1024 * 1024   # 20 MB
 
     def transcribe(self, file_path: str) -> List[Any]:
@@ -52,143 +50,199 @@ class AudioProcessor:
         raise last_exception
 
     def _log_memory_usage(self, tag: str = ""):
-        process = psutil.Process(os.getpid())
-        mem_info = process.memory_info()
-        print(f"[Memory Usage] {tag}: RSS={mem_info.rss / 1024 / 1024:.2f} MB")
+        try:
+            process = psutil.Process(os.getpid())
+            mem_info = process.memory_info()
+            print(f"[Memory Usage] {tag}: RSS={mem_info.rss / 1024 / 1024:.2f} MB")
+        except Exception:
+            pass
 
-    def process_large_file(self, file_path: str) -> List[Any]:
+    def _get_audio_duration(self, file_path: str) -> float:
+        """Get duration of audio file in seconds using ffprobe."""
+        cmd = [
+            "ffprobe", 
+            "-v", "error", 
+            "-show_entries", "format=duration", 
+            "-of", "default=noprint_wrappers=1:nokey=1", 
+            file_path
+        ]
+        try:
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            return float(result.stdout.strip())
+        except Exception as e:
+            print(f"Error getting duration: {e}")
+            return 0.0
+
+    def _detect_silence_intervals(self, file_path: str, silence_thresh="-30dB", min_silence_dur=1.0) -> List[Dict[str, float]]:
         """
-        Splits a large file on silence and transcribes chunks sequentially.
+        Detects silence intervals using ffmpeg silencedetect filter.
+        Returns list of dicts with 'start', 'end', 'duration' of silence.
+        """
+        print(f"Detecting silence in {file_path}...")
+        self._log_memory_usage("Before silence detection")
+        
+        # ffmpeg -i input -af silencedetect=noise=-30dB:d=1 -f null -
+        cmd = [
+            "ffmpeg",
+            "-i", file_path,
+            "-af", f"silencedetect=noise={silence_thresh}:d={min_silence_dur}",
+            "-f", "null",
+            "-"
+        ]
+        
+        # ffmpeg writes silencedetect output to stderr
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        output = result.stderr
+        
+        silence_list = []
+        
+        start_matches = list(re.finditer(r"silence_start: (\d+(\.\d*)?)", output))
+        end_matches = list(re.finditer(r"silence_end: (\d+(\.\d*)?)", output))
+        
+        starts = [float(m.group(1)) for m in start_matches]
+        ends = [float(m.group(1)) for m in end_matches]
+        
+        count = min(len(starts), len(ends))
+        for i in range(count):
+            silence_list.append({
+                "start": starts[i],
+                "end": ends[i],
+                "duration": ends[i] - starts[i]
+            })
+            
+        print(f"Detected {len(silence_list)} silence intervals.")
+        self._log_memory_usage("After silence detection")
+        return silence_list
+
+    def _determine_split_points(self, total_duration: float, silence_intervals: List[Dict[str, float]]) -> List[float]:
+        """
+        Calculates split points (timestamps) to chunk audio.
+        Target chunk duration: CHUNK_TARGET_DURATION_SEC
+        Ideally split in the middle of a silence interval.
+        """
+        split_points = []
+        current_time = 0.0
+        
+        while current_time + self.CHUNK_TARGET_DURATION_SEC < total_duration:
+            target_time = current_time + self.CHUNK_TARGET_DURATION_SEC
+            
+            # Find a silence interval near the target time
+            # Look for silence in range [target_time - 60s, target_time + 60s]
+            search_window_start = max(current_time + 60, target_time - 60)
+            search_window_end = min(total_duration, target_time + 60)
+            
+            candidates = [s for s in silence_intervals if s['start'] >= search_window_start and s['start'] <= search_window_end]
+            
+            if candidates:
+                candidates.sort(key=lambda s: abs(s['start'] - target_time))
+                chosen = candidates[0]
+                best_split = chosen['start'] + (chosen['duration'] / 2)
+            else:
+                print(f"Warning: No silence found near {target_time}s. Splitting forcefully.")
+                best_split = target_time
+            
+            split_points.append(best_split)
+            current_time = best_split
+            
+        return split_points
+
+    def process_large_file(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Splits a large file on silence using ffmpeg, transcribes, AND structures chunks sequentially.
+        Returns final structured chunks.
         """
         temp_dir = tempfile.mkdtemp()
-        all_segments = []
-        total_duration_offset = 0.0
-
+        final_chunks = []
+        
         try:
-            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-            print(f"Processing large audio file: {file_path} (Size: {file_size_mb:.2f} MB)")
-            self._log_memory_usage("Before loading audio")
-
-            print(f"Loading large audio file: {file_path}")
-            audio = AudioSegment.from_file(file_path)
-            self._log_memory_usage("After loading audio")
-
-            # 1. Split on silence
-            # min_silence_len: minimum length of silence to be considered a split point (ms)
-            # silence_thresh: loudness below which is considered silence (dBFS)
-            # keep_silence: amount of silence to leave at the beginning/end of the chunks
-            print("Splitting audio on silence...")
-            # Using defaults that usually work well for speech: 1000ms silence, -40dBFS
-            # We might want to make these configurable or robust
-            segments_audio = split_on_silence(
-                audio,
-                min_silence_len=1000,
-                silence_thresh=audio.dBFS - 16, # relative to average dBFS
-                keep_silence=500,
-                seek_step=100
-            )
-            self._log_memory_usage("After splitting audio")
-
-            if not segments_audio:
-                # If no silence found, fall back to simple chunking or just one chunk
-                # Ideally, we should just process as one, but if it's too big, it will fail.
-                # Let's assume if split_on_silence fails to find splits, we treat the whole as one,
-                # but if it was > 25MB, we might need force split.
-                # For now, let's treat the whole thing as one segment if splitting returned nothing.
-                segments_audio = [audio]
-
-            # 2. Group small segments into chunks of approx CHUNK_TARGET_DURATION_MS
-            chunks_to_process = []
-            current_chunk = AudioSegment.empty()
-
-            for seg in segments_audio:
-                if len(current_chunk) + len(seg) < self.CHUNK_TARGET_DURATION_MS:
-                    current_chunk += seg
-                else:
-                    # チャンクが空でない場合のみリストに追加する
-                    if len(current_chunk) > 0:
-                        chunks_to_process.append(current_chunk)
-                    current_chunk = seg
-
-            if len(current_chunk) > 0:
-                chunks_to_process.append(current_chunk)
-
-            print(f"Audio split into {len(chunks_to_process)} chunks.")
-
-            # 3. Process each chunk
-            for i, chunk_audio in enumerate(chunks_to_process):
+            print(f"Processing large audio file: {file_path}")
+            self._log_memory_usage("Start process_large_file")
+            
+            total_duration = self._get_audio_duration(file_path)
+            print(f"Total duration: {total_duration:.2f}s")
+            
+            silences = self._detect_silence_intervals(file_path)
+            split_points = self._determine_split_points(total_duration, silences)
+            
+            points = [0.0] + split_points + [total_duration]
+            total_chunks = len(points) - 1
+            print(f"[Progress] Total chunks to process: {total_chunks}")
+            print(f"Split points: {points}")
+            
+            for i in range(total_chunks):
+                start = points[i]
+                end = points[i+1]
+                duration = end - start
+                
+                if duration < 0.1:
+                    continue
+                
+                print(f"[Progress] Processing chunk {i+1}/{total_chunks} ({((i+1)/total_chunks)*100:.1f}%)")
                 chunk_filename = os.path.join(temp_dir, f"chunk_{i}.mp3")
-                print(f"Exporting chunk {i} to {chunk_filename}")
-                # Export as mp3 to save space/bandwidth
-                # Use standard bitrate and mono to ensure compatibility with Whisper API
-                chunk_audio.export(chunk_filename, format="mp3", bitrate="128k", parameters=["-ac", "1"])
+                print(f"Exporting chunk {i}: {start:.2f}s to {end:.2f}s ({duration:.2f}s) -> {chunk_filename}")
+                self._log_memory_usage(f"Before export chunk {i}")
 
+                cmd = [
+                    "ffmpeg", 
+                    "-v", "error",
+                    "-i", file_path,
+                    "-ss", str(start),
+                    "-to", str(end),
+                    "-c:a", "libmp3lame",
+                    "-q:a", "4",
+                    "-ac", "1",
+                    "-y",
+                    chunk_filename
+                ]
+                subprocess.run(cmd, check=True)
+                
                 chunk_size = os.path.getsize(chunk_filename)
                 print(f"Chunk {i} size: {chunk_size / (1024*1024):.2f} MB")
-
-                if chunk_size == 0:
-                    print(f"Error: Chunk {i} is empty (0 bytes). Skipping transcription for this chunk.")
-                    continue
-
-                # Check size just in case
-                if chunk_size > 25 * 1024 * 1024:
-                    print(f"Warning: Chunk {i} is larger than 25MB even after splitting.")
-                    # In a real robust system, we would force-split this chunk further.
-
-                print(f"Transcribing chunk {i}...")
+                
+                print(f"[Progress] Step: Transcribing chunk {i+1}/{total_chunks}...")
                 segments = self.transcribe_with_retry(chunk_filename)
+                
+                # Cleanup chunk file
+                try:
+                    os.remove(chunk_filename)
+                except:
+                    pass
+                
+                print(f"[Progress] Step: Structuring chunk {i+1}/{total_chunks} with LLM...")
+                # Immediately process segments into logical chunks with titles
+                # Note: split_and_title returns chunks with start_time/end_time relative to the chunk audio (0.0 based)
+                local_chunks = self.split_and_title(segments)
+                
+                # Adjust timestamps to be absolute relative to the original file
+                for chunk in local_chunks:
+                    chunk["start_time"] += start
+                    chunk["end_time"] += start
+                    final_chunks.append(chunk)
 
-                # 4. Adjust timestamps and merge
-                chunk_duration_sec = len(chunk_audio) / 1000.0
-
-                for segment in segments:
-                    # 'segment' is usually an object or dict depending on library version.
-                    # The existing code handles dict or object access in split_and_title.
-                    # Here we need to update it.
-                    # Since transcribe returns objects usually, let's assume objects or dicts.
-                    # Actually transcribe returns transcript.segments which are objects in openai v1
-
-                    # We need to modify the segment. We can't easily modify the API response object directly
-                    # if it's frozen. Let's convert to dict if possible or create a new structure.
-                    # Existing code expects: s["start"] or s.start
-
-                    # Let's convert to a simple dict to be safe and consistent
-                    start = getattr(segment, 'start', segment.get('start', 0))
-                    end = getattr(segment, 'end', segment.get('end', 0))
-                    text = getattr(segment, 'text', segment.get('text', ""))
-
-                    new_seg = {
-                        "start": start + total_duration_offset,
-                        "end": end + total_duration_offset,
-                        "text": text
-                    }
-                    all_segments.append(new_seg)
-
-                total_duration_offset += chunk_duration_sec
-
+        except Exception as e:
+            print(f"Error in process_large_file: {e}")
+            import traceback
+            traceback.print_exc()
+            raise e
         finally:
-            # Cleanup
             print(f"Cleaning up temp dir: {temp_dir}")
             shutil.rmtree(temp_dir)
 
-        return all_segments
+        return final_chunks
 
     def split_and_title(self, segments: List[Any]) -> List[Dict[str, Any]]:
         """
         Uses GPT-4o-mini to split transcript segments into logical chunks with titles.
         """
-        # Prepare input for LLM to save tokens and focus on content
-        # Note: If segments come from process_large_file, they are already dicts.
-        # If they come from transcribe(), they are objects.
         simplified_segments = []
         for s in segments:
             if isinstance(s, dict):
                 simplified_segments.append({
-                    "start": s["start"], "end": s["end"], "text": s["text"]
+                    "start": s.get("start",0), "end": s.get("end",0), "text": s.get("text","")
                 })
             else:
                 simplified_segments.append({
-                    "start": s.start, "end": s.end, "text": s.text
+                    "start": getattr(s, 'start', 0), "end": getattr(s, 'end', 0), "text": getattr(s, 'text', "")
                 })
 
         prompt = """
@@ -203,6 +257,10 @@ class AudioProcessor:
         Return the result as a JSON object with a single key "chunks", which is a list of objects.
         Each object must have the following keys: "title", "start_time", "end_time", "transcript".
         """
+        
+        # If segments are empty, return empty
+        if not simplified_segments:
+             return []
 
         response = self.client.chat.completions.create(
             model="gpt-4o-mini",
@@ -229,9 +287,13 @@ class AudioProcessor:
 
         if file_size > self.FILE_SIZE_LIMIT_BYTES:
             print(f"File size {file_size} exceeds limit {self.FILE_SIZE_LIMIT_BYTES}. Using split processing.")
-            segments = self.process_large_file(file_path)
+            # Returns fully structured chunks
+            chunks = self.process_large_file(file_path)
         else:
+            print(f"Processing small audio file: {file_path}")
+            print(f"[Progress] Step: Transcribing small file...")
             segments = self.transcribe(file_path)
+            print(f"[Progress] Step: Structuring small file with LLM...")
+            chunks = self.split_and_title(segments)
 
-        chunks = self.split_and_title(segments)
         return chunks

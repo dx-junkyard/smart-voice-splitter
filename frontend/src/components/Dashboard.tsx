@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { getProfiles, type Profile, uploadFile } from '../api';
-import { Calendar, FileText, Upload, X } from 'lucide-react';
+import { getProfiles, type Profile, uploadFile, deleteProfile, retryProcessing } from '../api';
+import { Calendar, FileText, Upload, X, Trash2, RefreshCw, AlertCircle } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -12,6 +12,8 @@ function cn(...inputs: (string | undefined | null | false)[]) {
 const Dashboard: React.FC = () => {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [showUploadModal, setShowUploadModal] = useState(false);
+  const [profileToDelete, setProfileToDelete] = useState<Profile | null>(null);
+  const [retryingIds, setRetryingIds] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     fetchProfiles();
@@ -26,7 +28,42 @@ const Dashboard: React.FC = () => {
     } catch (error) {
       console.error('Failed to fetch profiles', error);
     }
+  }
+
+  const handleDeleteProfile = async () => {
+    if (!profileToDelete) return;
+    try {
+      await deleteProfile(profileToDelete.id);
+      setProfileToDelete(null);
+      fetchProfiles();
+    } catch (error) {
+      console.error('Failed to delete profile', error);
+      alert('Failed to delete profile');
+    }
   };
+
+  const handleRetry = async (e: React.MouseEvent, profileId: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    setRetryingIds(prev => new Set(prev).add(profileId));
+    try {
+      await retryProcessing(profileId);
+      // Refresh list to update status/chunks
+      fetchProfiles();
+      alert("Processing restarted. Please wait.");
+    } catch (error) {
+      console.error("Retry failed", error);
+      alert("Retry failed. Check console.");
+    } finally {
+      setRetryingIds(prev => {
+        const next = new Set(prev);
+        next.delete(profileId);
+        return next;
+      });
+    }
+  };
+
 
   return (
     <div className="container mx-auto p-6">
@@ -46,8 +83,19 @@ const Dashboard: React.FC = () => {
           <Link
             to={`/profiles/${profile.id}`}
             key={profile.id}
-            className="block bg-white rounded-xl shadow-md hover:shadow-lg transition p-6 border border-gray-100"
+            className="block bg-white rounded-xl shadow-md hover:shadow-lg transition p-6 border border-gray-100 relative group"
           >
+            <button
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setProfileToDelete(profile);
+              }}
+              className="absolute top-4 right-4 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition p-2 hover:bg-red-50 rounded-full"
+              title="Delete Profile"
+            >
+              <Trash2 size={20} />
+            </button>
             <h2 className="text-xl font-semibold mb-2 text-gray-800">{profile.title}</h2>
             <div className="flex items-center text-gray-500 text-sm mb-4">
               <Calendar size={16} className="mr-2" />
@@ -56,16 +104,66 @@ const Dashboard: React.FC = () => {
             {profile.summary && (
               <p className="text-gray-600 line-clamp-3 text-sm">{profile.summary}</p>
             )}
-            <div className="mt-4 flex items-center text-blue-600 text-sm font-medium">
-                <FileText size={16} className="mr-1" />
-                View Details
-            </div>
+
+            {/* Status / Resume Logic */}
+            {(() => {
+              const recording = profile.recordings[0];
+              const hasRecording = !!recording;
+              const status = recording?.status || 'pending';
+              // Previous data might have no status but have chunks (completed) or 0 chunks (failed/pending)
+              // If status is present, use it. If not, infer.
+              const inferredStatus = status === 'pending' && (!recording || recording.chunks.length === 0)
+                ? 'failed' // assume failed if no chunks and no explicit status/pending
+                : status;
+
+              // If we have status, trust it. "pending" usually means default, "processing", "completed", "failed".
+              // If old data (no status column in DB yet migrated to default='completed'), check chunks.
+              const isProcessing = status === 'processing' || retryingIds.has(profile.id);
+              // condition to show retry: status failed OR (status completed but 0 chunks??)
+
+              // Simplified: Show retry if we have a recording but no chunks (and not processing), or explicit failed status
+              const showRetry = hasRecording && !isProcessing && (status === 'failed' || (status === 'completed' && recording.chunks.length === 0));
+
+              if (isProcessing) {
+                return (
+                  <div className="mt-4 flex items-center text-orange-600 text-sm font-medium animate-pulse">
+                    <RefreshCw size={16} className="mr-1 animate-spin" />
+                    Processing...
+                  </div>
+                );
+              }
+
+              if (showRetry) {
+                return (
+                  <div className="mt-4 flex items-center gap-4">
+                    <div className="flex items-center text-red-600 text-sm font-medium">
+                      <AlertCircle size={16} className="mr-1" />
+                      Processing Failed
+                    </div>
+                    <button
+                      onClick={(e) => handleRetry(e, profile.id)}
+                      className="flex items-center text-blue-600 text-sm font-medium hover:underline"
+                    >
+                      <RefreshCw size={16} className="mr-1" />
+                      Resume
+                    </button>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="mt-4 flex items-center text-blue-600 text-sm font-medium">
+                  <FileText size={16} className="mr-1" />
+                  View Details
+                </div>
+              );
+            })()}
           </Link>
         ))}
         {profiles.length === 0 && (
-            <div className="col-span-full text-center py-12 text-gray-500">
-                No recordings found. Start by uploading a new file.
-            </div>
+          <div className="col-span-full text-center py-12 text-gray-500">
+            No recordings found. Start by uploading a new file.
+          </div>
         )}
       </div>
 
@@ -76,6 +174,14 @@ const Dashboard: React.FC = () => {
             setShowUploadModal(false);
             fetchProfiles();
           }}
+        />
+      )}
+
+      {profileToDelete && (
+        <DeleteModal
+          profile={profileToDelete}
+          onClose={() => setProfileToDelete(null)}
+          onConfirm={handleDeleteProfile}
         />
       )}
     </div>
@@ -98,8 +204,8 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess }) => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file || !title || !recordedAt) {
-        setError("Please fill in all required fields.");
-        return;
+      setError("Please fill in all required fields.");
+      return;
     }
 
     setLoading(true);
@@ -183,6 +289,72 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess }) => {
             {loading ? "AI is processing audio..." : "Upload & Process"}
           </button>
         </form>
+      </div>
+    </div>
+  );
+};
+
+
+interface DeleteModalProps {
+  profile: Profile;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}
+
+const DeleteModal: React.FC<DeleteModalProps> = ({ profile, onClose, onConfirm }) => {
+  const [titleConfirm, setTitleConfirm] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const isMatch = titleConfirm === profile.title;
+
+  const handleConfirm = async () => {
+    if (!isMatch) return;
+    setLoading(true);
+    await onConfirm();
+    setLoading(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-lg p-8 w-full max-w-md relative">
+        <button onClick={onClose} className="absolute top-4 right-4 text-gray-500 hover:text-gray-700">
+          <X size={24} />
+        </button>
+        <h2 className="text-xl font-bold mb-4 text-red-600">Delete Profile</h2>
+        <p className="text-gray-600 mb-4">
+          Are you sure you want to delete <strong>{profile.title}</strong>? This action cannot be undone.
+        </p>
+        <p className="text-sm text-gray-500 mb-2">
+          Please type <strong>{profile.title}</strong> to confirm.
+        </p>
+        <input
+          type="text"
+          value={titleConfirm}
+          onChange={(e) => setTitleConfirm(e.target.value)}
+          className="w-full border border-gray-300 rounded-lg p-2 mb-6 focus:ring-2 focus:ring-red-500 focus:outline-none"
+          placeholder="Type profile title here"
+        />
+        <div className="flex justify-end gap-3">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg transition"
+            disabled={loading}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleConfirm}
+            disabled={!isMatch || loading}
+            className={cn(
+              "px-4 py-2 text-white rounded-lg transition font-medium",
+              !isMatch || loading
+                ? "bg-gray-300 cursor-not-allowed"
+                : "bg-red-600 hover:bg-red-700"
+            )}
+          >
+            {loading ? "Deleting..." : "Delete Profile"}
+          </button>
+        </div>
       </div>
     </div>
   );
