@@ -2,6 +2,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 
+# Chunk Schemas
 class ChunkBase(BaseModel):
     title: str
     transcript: str
@@ -19,6 +20,7 @@ class Chunk(ChunkBase):
     class Config:
         from_attributes = True
 
+# Recording Schemas
 class RecordingBase(BaseModel):
     file_path: str
 
@@ -27,8 +29,26 @@ class RecordingCreate(RecordingBase):
 
 class Recording(RecordingBase):
     id: int
+    profile_id: int
     created_at: datetime
     chunks: List[Chunk] = []
+
+    class Config:
+        from_attributes = True
+
+# Profile Schemas
+class ProfileBase(BaseModel):
+    title: str
+    recorded_at: datetime
+    summary: Optional[str] = None
+
+class ProfileCreate(ProfileBase):
+    pass
+
+class Profile(ProfileBase):
+    id: int
+    created_at: datetime
+    recordings: List[Recording] = []
 
     class Config:
         from_attributes = True
