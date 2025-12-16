@@ -1,3 +1,17 @@
+"""
+このスクリプトは、既存のデータベーススキーマを新しいProfileモデルを含む形式に移行するためのものです。
+既存のRecordingデータは、自動的に作成される「Imported Legacy Data」というデフォルトのProfileに紐づけられます。
+
+【使い方】
+以下のコマンドを実行してください。
+PYTHONPATH環境変数を設定して、モジュールのインポートパスを解決する必要があります。
+
+bash
+export PYTHONPATH=$PYTHONPATH:$(pwd)/backend
+python backend/migrate_data.py
+
+注意: 実行する前にサーバーを停止することをお勧めします。
+"""
 import os
 import sys
 from datetime import datetime
