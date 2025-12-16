@@ -274,7 +274,23 @@ class AudioProcessor:
         content = response.choices[0].message.content
         try:
             result = json.loads(content)
-            return result.get("chunks", [])
+            chunks = result.get("chunks", [])
+            
+            # Check if chunks is a list
+            if not isinstance(chunks, list):
+                print(f"Unexpected format for 'chunks': {type(chunks)}. Content: {content}")
+                return []
+            
+            # Validate each chunk is a dict with required keys
+            valid_chunks = []
+            for c in chunks:
+                if isinstance(c, dict) and "start_time" in c and "end_time" in c:
+                    valid_chunks.append(c)
+                else:
+                    print(f"Skipping invalid chunk format: {c}")
+            
+            return valid_chunks
+
         except json.JSONDecodeError:
             print("Failed to decode JSON from LLM response")
             return []
