@@ -1,3 +1,4 @@
+from fastapi.staticfiles import StaticFiles
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -118,6 +119,29 @@ def read_profiles(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
 def read_recordings(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     recordings = db.query(models.Recording).offset(skip).limit(limit).all()
     return recordings
+
+@app.get("/profiles/{profile_id}", response_model=schemas.Profile)
+def read_profile(profile_id: int, db: Session = Depends(get_db)):
+    profile = db.query(models.Profile).filter(models.Profile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return profile
+
+@app.patch("/chunks/{chunk_id}", response_model=schemas.Chunk)
+def update_chunk_note(chunk_id: int, chunk_update: schemas.ChunkUpdate, db: Session = Depends(get_db)):
+    chunk = db.query(models.Chunk).filter(models.Chunk.id == chunk_id).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+
+    if chunk_update.user_note is not None:
+        chunk.user_note = chunk_update.user_note
+
+    db.commit()
+    db.refresh(chunk)
+    return chunk
+
+# Mount static files to serve audio
+app.mount("/static", StaticFiles(directory=UPLOAD_DIR), name="static")
 
 @app.get("/")
 def read_root():

@@ -6,9 +6,10 @@ AIを活用して音声の文字起こしを行い、文脈に基づいて自動
 ## システム構成
 
 ### アーキテクチャ概要
-このプロジェクトは、FastAPIバックエンドとReactフロントエンド（予定）で構成されています。現在はバックエンドのコアロジックが実装されています。
+このプロジェクトは、FastAPIバックエンドとReactフロントエンドで構成されています。
 
 ### 技術スタック
+- **Frontend**: React (Vite), TypeScript, Tailwind CSS
 - **Backend**: FastAPI (Python)
 - **AI/ML**:
     - **STT (Speech-to-Text)**: OpenAI Whisper API
@@ -30,12 +31,17 @@ AIを活用して音声の文字起こしを行い、文脈に基づいて自動
 │   ├── models.py       # データベースモデル
 │   ├── schemas.py      # Pydantic スキーマ
 │   └── database.py     # データベース接続設定
+├── frontend/           # React フロントエンド
+│   ├── src/            # ソースコード
+│   │   ├── components/ # UIコンポーネント
+│   │   └── api.ts      # APIクライアント
+│   └── index.html      # エントリーポイント
 ├── uploads/            # アップロードされた音声ファイル (自動生成)
 ├── docker-compose.yml  # コンテナ起動設定
 └── README.md           # プロジェクトドキュメント
 ```
 
-## 使い方 (Backend)
+## 使い方
 
 ### 必要条件
 - Docker & Docker Compose
@@ -44,23 +50,29 @@ AIを活用して音声の文字起こしを行い、文脈に基づいて自動
 ### 起動手順
 
 1. 環境変数の設定
-   `backend/.env.example` を参考に、環境変数を設定してください（`docker-compose.yml` 内で指定するか、`.env` ファイルを作成して読み込ませるなど）。
-   最低限 `OPENAI_API_KEY` が必要です。
+   `docker-compose.yml` 内の `OPENAI_API_KEY` を自身のAPIキーに置き換えるか、環境変数としてエクスポートしてください。
+
+   ```bash
+   export OPENAI_API_KEY=sk-...
+   ```
 
 2. Docker コンテナのビルドと起動
    ```bash
    docker-compose up --build
    ```
 
-3. API ドキュメントへのアクセス
-   ブラウザで `http://localhost:8000/docs` にアクセスすると、Swagger UI が表示されます。
+3. アプリケーションへのアクセス
+   - **Web UI (Frontend)**: `http://localhost:5173`
+   - **API Docs (Backend)**: `http://localhost:8000/docs`
 
-### 主な API エンドポイント
+### 機能
 
-- `POST /upload`: 音声ファイルをアップロードし、処理を開始します。
-    - **Input**: 音声ファイル (multipart/form-data)
-    - **Output**: 作成された Recording オブジェクトと分割された Chunks
-- `GET /recordings`: 保存された録音データのリストを取得します。
+- **ダッシュボード**: アップロード済みの録音（Profile）一覧を表示します。
+- **新規アップロード**: 音声ファイルをアップロードし、タイトルと録音日時を指定して解析を開始します。
+- **詳細ビュー (プレイヤー)**:
+    - AIが生成したチャプターごとのナビゲーション
+    - 音声プレイヤーと同期した文字起こし表示
+    - チャプターごとのメモ機能（自動保存）
 
 ## 開発ノート
 
