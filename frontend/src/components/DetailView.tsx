@@ -413,7 +413,7 @@ const DetailView: React.FC = () => {
                                             {/* Per-Chunk Audio Player */}
                                             <div className="mb-4">
                                                 <audio
-                                                    ref={isPlaying ? audioRef : null}
+                                                    ref={isExpanded ? audioRef : null}
                                                     controls
                                                     className="w-full"
                                                     src={getAudioUrl(chunk.file_path)}
