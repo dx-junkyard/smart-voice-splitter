@@ -19,6 +19,9 @@ class AudioProcessor:
         # 10 mins at 128kbps is ~10MB.
         self.CHUNK_TARGET_DURATION_SEC = 10 * 60  # 10 minutes
         self.FILE_SIZE_LIMIT_BYTES = 20 * 1024 * 1024   # 20 MB
+        self.UPLOADS_DIR = "uploads"
+        self.CHUNKS_DIR = os.path.join(self.UPLOADS_DIR, "chunks")
+        os.makedirs(self.CHUNKS_DIR, exist_ok=True)
     def _log(self, message: str):
         """Helper to print messages with timestamp."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -167,7 +170,11 @@ class AudioProcessor:
         Splits a large file on silence using ffmpeg, transcribes, AND structures chunks sequentially.
         Returns final structured chunks.
         """
-        temp_dir = tempfile.mkdtemp()
+        # Create a persistent directory for chunks
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        chunk_dir = os.path.join(self.CHUNKS_DIR, base_name)
+        os.makedirs(chunk_dir, exist_ok=True)
+        
         final_chunks = []
         
         try:
@@ -193,11 +200,8 @@ class AudioProcessor:
                 if duration < 0.1:
                     continue
                 
-                if duration < 0.1:
-                    continue
-                
                 self._log(f"[Progress] Processing chunk {i+1}/{total_chunks} ({((i+1)/total_chunks)*100:.1f}%)")
-                chunk_filename = os.path.join(temp_dir, f"chunk_{i}.mp3")
+                chunk_filename = os.path.join(chunk_dir, f"chunk_{i}.mp3")
                 self._log(f"Exporting chunk {i}: {start:.2f}s to {end:.2f}s ({duration:.2f}s) -> {chunk_filename}")
                 self._log_memory_usage(f"Before export chunk {i}")
 
@@ -221,12 +225,6 @@ class AudioProcessor:
                 self._log(f"[Progress] Step: Transcribing chunk {i+1}/{total_chunks}...")
                 segments = self.transcribe_with_retry(chunk_filename)
                 
-                # Cleanup chunk file
-                try:
-                    os.remove(chunk_filename)
-                except:
-                    pass
-                
                 self._log(f"[Progress] Step: Structuring chunk {i+1}/{total_chunks} with LLM...")
                 # Immediately process segments into logical chunks with titles
                 # Note: split_and_title returns chunks with start_time/end_time relative to the chunk audio (0.0 based)
@@ -236,6 +234,21 @@ class AudioProcessor:
                 for chunk in local_chunks:
                     chunk["start_time"] += start
                     chunk["end_time"] += start
+                    # Save the file_path. For large files, we map one physical chunk to potential multiple logical chunks? 
+                    # Wait, the prompt says "file_path (String, nullable=True) to save split audio file path".
+                    # In process_large_file, we split by silence first (Physical Chunks), then Transcribe, then Structure (Logical Chunks).
+                    # The Physical Chunks are stuck here. But LLM might split the transcript further or combine?
+                    # "split_and_title" returns "chunks".
+                    # Actually, for large files, the current logic is: 
+                    # 1. Physical Split -> 2. Transcribe -> 3. Structure (LLM) -> 4. Resulting Chunks.
+                    # The Resulting Chunks from LLM are currently "Virtual" segments of the Physical Chunk.
+                    # If LLM returns multiple chunks for one physical chunk, strictly speaking they all share the same physical audio?
+                    # OR, do we need to cut AGAIN based on LLM?
+                    # The prompt says: "Small files... cut based on LLM timestamps". 
+                    # For LARGE files: "Generated split (chunk) audio files... persist... link to each chunk".
+                    # The simplest interpretation of "persist the split files generated in process_large_file" is to use `chunk_filename`.
+                    # And assign that `chunk_filename` to all logical chunks derived from it.
+                    chunk["file_path"] = chunk_filename
                     final_chunks.append(chunk)
 
         except Exception as e:
@@ -243,10 +256,7 @@ class AudioProcessor:
             import traceback
             traceback.print_exc()
             raise e
-        finally:
-            self._log(f"Cleaning up temp dir: {temp_dir}")
-            shutil.rmtree(temp_dir)
-
+            
         return final_chunks
 
     def split_and_title(self, segments: List[Any]) -> List[Dict[str, Any]]:
@@ -334,7 +344,44 @@ class AudioProcessor:
             self._log(f"[Progress] Step: Transcribing small file...")
             segments = self.transcribe(file_path)
             self._log(f"[Progress] Step: Structuring small file with LLM...")
+            # Note: For small files, segments are relative to 0.0 of the file.
             chunks = self.split_and_title(segments)
+
+            # For small files, we now need to physically cut the file based on the LLM chunks
+            # Create a persistent directory for chunks
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            chunk_dir = os.path.join(self.CHUNKS_DIR, base_name)
+            os.makedirs(chunk_dir, exist_ok=True)
+
+            self._log(f"Generating physical audio files for {len(chunks)} chunks in {chunk_dir}...")
+            
+            for i, chunk in enumerate(chunks):
+                chunk_filename = os.path.join(chunk_dir, f"chunk_{i}.mp3")
+                start = chunk.get("start_time", 0.0)
+                end = chunk.get("end_time", 0.0)
+                
+                # If start/end are missing or invalid, fallback?
+                # LLM response returns start_time/end_time.
+                
+                self._log(f"Exporting small file chunk {i}: {start:.2f} to {end:.2f} -> {chunk_filename}")
+                cmd = [
+                    "ffmpeg", 
+                    "-v", "error",
+                    "-i", file_path,
+                    "-ss", str(start),
+                    "-to", str(end),
+                    "-c:a", "libmp3lame",
+                    "-q:a", "4",
+                    "-ac", "1",
+                    "-y",
+                    chunk_filename
+                ]
+                try:
+                    subprocess.run(cmd, check=True)
+                    chunk["file_path"] = chunk_filename
+                except Exception as e:
+                    self._log(f"Error cutting chunk {i}: {e}")
+                    chunk["file_path"] = None # Or handle error?
 
         self._log(f"[Process End] Processing completed for file: {file_path}")
         return chunks

@@ -62,6 +62,7 @@ except Exception as e:
 
 @app.post("/upload", response_model=schemas.Recording)
 def upload_audio(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     title: str = Form(...),
     recorded_at: datetime = Form(...),
@@ -92,7 +93,7 @@ def upload_audio(
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # 3. Create Recording entry (Status: pending)
+    # 3. Create Recording entry (Status: processing)
     recording = models.Recording(
         file_path=file_path,
         profile_id=new_profile.id,
@@ -102,32 +103,10 @@ def upload_audio(
     db.commit()
     db.refresh(recording)
 
-    try:
-        # 4. Process audio
-        chunks_data = audio_processor.process(file_path)
+    # 4. Offload processing to background
+    background_tasks.add_task(process_recording_background, recording.id)
 
-        # 5. Save Chunks
-        for chunk_data in chunks_data:
-            chunk = models.Chunk(
-                recording_id=recording.id,
-                title=chunk_data.get("title", "Untitled"),
-                transcript=chunk_data.get("transcript", ""),
-                start_time=chunk_data.get("start_time", 0.0),
-                end_time=chunk_data.get("end_time", 0.0),
-                user_note=chunk_data.get("user_note", None)
-            )
-            db.add(chunk)
-
-        recording.status = "completed"
-        db.commit()
-        db.refresh(recording)
-        return recording
-
-    except Exception as e:
-        print(f"Error processing audio: {e}")
-        recording.status = "failed"
-        db.commit()
-        raise HTTPException(status_code=500, detail=str(e))
+    return recording
 
 @app.get("/profiles", response_model=list[schemas.Profile])
 def read_profiles(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
@@ -168,9 +147,34 @@ def delete_profile(profile_id: int, db: Session = Depends(get_db)):
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
     
+    # Cascade delete in DB handles records, but we must delete physical files.
+    # Get all recordings associated with this profile
+    recordings = db.query(models.Recording).filter(models.Recording.profile_id == profile_id).all()
+    
+    for rec in recordings:
+        # Delete original file
+        if rec.file_path and os.path.exists(rec.file_path):
+            try:
+                os.remove(rec.file_path)
+                print(f"Deleted original file: {rec.file_path}")
+            except Exception as e:
+                print(f"Error deleting file {rec.file_path}: {e}")
+        
+        # Delete chunks directory
+        # The logic in AudioProcessor uses os.path.splitext(os.path.basename(file_path))[0]
+        if rec.file_path:
+            try:
+                base_name = os.path.splitext(os.path.basename(rec.file_path))[0]
+                chunk_dir = os.path.join("uploads", "chunks", base_name)
+                if os.path.exists(chunk_dir):
+                    shutil.rmtree(chunk_dir)
+                    print(f"Deleted chunks directory: {chunk_dir}")
+            except Exception as e:
+                print(f"Error deleting chunks directory for {rec.file_path}: {e}")
+
     db.delete(profile)
     db.commit()
-    return {"message": "Profile deleted successfully"}
+    return {"message": "Profile and associated files deleted successfully"}
 
 def process_recording_background(recording_id: int):
     """
@@ -206,7 +210,8 @@ def process_recording_background(recording_id: int):
                 transcript=chunk_data.get("transcript", ""),
                 start_time=chunk_data.get("start_time", 0.0),
                 end_time=chunk_data.get("end_time", 0.0),
-                user_note=chunk_data.get("user_note", None)
+                user_note=chunk_data.get("user_note", None),
+                file_path=chunk_data.get("file_path", None)
             )
             db.add(chunk)
 
