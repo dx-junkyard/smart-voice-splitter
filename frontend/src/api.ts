@@ -14,6 +14,7 @@ export interface Chunk {
   start_time: number;
   end_time: number;
   user_note: string | null;
+  file_path: string | null;
   is_bookmarked: boolean;
 }
 
