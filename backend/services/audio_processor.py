@@ -7,6 +7,7 @@ import subprocess
 import re
 from typing import List, Dict, Any, Optional
 import psutil
+from datetime import datetime
 
 from openai import OpenAI
 
@@ -18,18 +19,34 @@ class AudioProcessor:
         # 10 mins at 128kbps is ~10MB.
         self.CHUNK_TARGET_DURATION_SEC = 10 * 60  # 10 minutes
         self.FILE_SIZE_LIMIT_BYTES = 20 * 1024 * 1024   # 20 MB
+        self.UPLOADS_DIR = "uploads"
+        self.CHUNKS_DIR = os.path.join(self.UPLOADS_DIR, "chunks")
+        os.makedirs(self.CHUNKS_DIR, exist_ok=True)
+    def _log(self, message: str):
+        """Helper to print messages with timestamp."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] {message}", flush=True)
 
     def transcribe(self, file_path: str) -> List[Any]:
         """
         Transcribes audio file using OpenAI Whisper API.
         Returns a list of segments with start, end, and text.
         """
+
+        self._log(f"[OpenAI Request] Transcribing file: {file_path}")
         with open(file_path, "rb") as audio_file:
             transcript = self.client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
-                response_format="verbose_json"
+                response_format="verbose_json",
+                language="ja"
             )
+        
+        # Log first 30 chars of the transcript text
+        full_text = getattr(transcript, 'text', '')
+        preview = full_text[:50].replace('\n', ' ')
+        self._log(f"[OpenAI Response] Transcription result: {preview}... (Length: {len(full_text)})")
+
         # The verbose_json response includes 'segments'
         return transcript.segments
 
@@ -43,17 +60,17 @@ class AudioProcessor:
                 return self.transcribe(file_path)
             except Exception as e:
                 last_exception = e
-                print(f"Attempt {attempt + 1} failed for {file_path}: {e}")
+                self._log(f"Attempt {attempt + 1} failed for {file_path}: {e}")
                 time.sleep(1) # wait a bit before retry
 
-        print(f"All {max_retries} attempts failed for {file_path}")
+        self._log(f"All {max_retries} attempts failed for {file_path}")
         raise last_exception
 
     def _log_memory_usage(self, tag: str = ""):
         try:
             process = psutil.Process(os.getpid())
             mem_info = process.memory_info()
-            print(f"[Memory Usage] {tag}: RSS={mem_info.rss / 1024 / 1024:.2f} MB")
+            self._log(f"[Memory Usage] {tag}: RSS={mem_info.rss / 1024 / 1024:.2f} MB")
         except Exception:
             pass
 
@@ -68,9 +85,11 @@ class AudioProcessor:
         ]
         try:
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-            return float(result.stdout.strip())
+            duration = float(result.stdout.strip())
+            self._log(f"[Process Info] Audio duration: {duration:.2f}s")
+            return duration
         except Exception as e:
-            print(f"Error getting duration: {e}")
+            self._log(f"Error getting duration: {e}")
             return 0.0
 
     def _detect_silence_intervals(self, file_path: str, silence_thresh="-30dB", min_silence_dur=1.0) -> List[Dict[str, float]]:
@@ -78,7 +97,7 @@ class AudioProcessor:
         Detects silence intervals using ffmpeg silencedetect filter.
         Returns list of dicts with 'start', 'end', 'duration' of silence.
         """
-        print(f"Detecting silence in {file_path}...")
+        self._log(f"[Process Start] Detecting silence in {file_path}...")
         self._log_memory_usage("Before silence detection")
         
         # ffmpeg -i input -af silencedetect=noise=-30dB:d=1 -f null -
@@ -110,7 +129,7 @@ class AudioProcessor:
                 "duration": ends[i] - starts[i]
             })
             
-        print(f"Detected {len(silence_list)} silence intervals.")
+        print(f"[Process End] Detected {len(silence_list)} silence intervals.", flush=True)
         self._log_memory_usage("After silence detection")
         return silence_list
 
@@ -138,7 +157,7 @@ class AudioProcessor:
                 chosen = candidates[0]
                 best_split = chosen['start'] + (chosen['duration'] / 2)
             else:
-                print(f"Warning: No silence found near {target_time}s. Splitting forcefully.")
+                self._log(f"Warning: No silence found near {target_time}s. Splitting forcefully.")
                 best_split = target_time
             
             split_points.append(best_split)
@@ -151,23 +170,27 @@ class AudioProcessor:
         Splits a large file on silence using ffmpeg, transcribes, AND structures chunks sequentially.
         Returns final structured chunks.
         """
-        temp_dir = tempfile.mkdtemp()
+        # Create a persistent directory for chunks
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        chunk_dir = os.path.join(self.CHUNKS_DIR, base_name)
+        os.makedirs(chunk_dir, exist_ok=True)
+        
         final_chunks = []
         
         try:
-            print(f"Processing large audio file: {file_path}")
+            self._log(f"Processing large audio file: {file_path}")
             self._log_memory_usage("Start process_large_file")
             
             total_duration = self._get_audio_duration(file_path)
-            print(f"Total duration: {total_duration:.2f}s")
+            self._log(f"Total duration: {total_duration:.2f}s")
             
             silences = self._detect_silence_intervals(file_path)
             split_points = self._determine_split_points(total_duration, silences)
             
             points = [0.0] + split_points + [total_duration]
             total_chunks = len(points) - 1
-            print(f"[Progress] Total chunks to process: {total_chunks}")
-            print(f"Split points: {points}")
+            self._log(f"[Progress] Total chunks to process: {total_chunks}")
+            self._log(f"Split points: {points}")
             
             for i in range(total_chunks):
                 start = points[i]
@@ -177,9 +200,9 @@ class AudioProcessor:
                 if duration < 0.1:
                     continue
                 
-                print(f"[Progress] Processing chunk {i+1}/{total_chunks} ({((i+1)/total_chunks)*100:.1f}%)")
-                chunk_filename = os.path.join(temp_dir, f"chunk_{i}.mp3")
-                print(f"Exporting chunk {i}: {start:.2f}s to {end:.2f}s ({duration:.2f}s) -> {chunk_filename}")
+                self._log(f"[Progress] Processing chunk {i+1}/{total_chunks} ({((i+1)/total_chunks)*100:.1f}%)")
+                chunk_filename = os.path.join(chunk_dir, f"chunk_{i}.mp3")
+                self._log(f"Exporting chunk {i}: {start:.2f}s to {end:.2f}s ({duration:.2f}s) -> {chunk_filename}")
                 self._log_memory_usage(f"Before export chunk {i}")
 
                 cmd = [
@@ -197,18 +220,12 @@ class AudioProcessor:
                 subprocess.run(cmd, check=True)
                 
                 chunk_size = os.path.getsize(chunk_filename)
-                print(f"Chunk {i} size: {chunk_size / (1024*1024):.2f} MB")
+                self._log(f"Chunk {i} size: {chunk_size / (1024*1024):.2f} MB")
                 
-                print(f"[Progress] Step: Transcribing chunk {i+1}/{total_chunks}...")
+                self._log(f"[Progress] Step: Transcribing chunk {i+1}/{total_chunks}...")
                 segments = self.transcribe_with_retry(chunk_filename)
                 
-                # Cleanup chunk file
-                try:
-                    os.remove(chunk_filename)
-                except:
-                    pass
-                
-                print(f"[Progress] Step: Structuring chunk {i+1}/{total_chunks} with LLM...")
+                self._log(f"[Progress] Step: Structuring chunk {i+1}/{total_chunks} with LLM...")
                 # Immediately process segments into logical chunks with titles
                 # Note: split_and_title returns chunks with start_time/end_time relative to the chunk audio (0.0 based)
                 local_chunks = self.split_and_title(segments)
@@ -217,17 +234,29 @@ class AudioProcessor:
                 for chunk in local_chunks:
                     chunk["start_time"] += start
                     chunk["end_time"] += start
+                    # Save the file_path. For large files, we map one physical chunk to potential multiple logical chunks? 
+                    # Wait, the prompt says "file_path (String, nullable=True) to save split audio file path".
+                    # In process_large_file, we split by silence first (Physical Chunks), then Transcribe, then Structure (Logical Chunks).
+                    # The Physical Chunks are stuck here. But LLM might split the transcript further or combine?
+                    # "split_and_title" returns "chunks".
+                    # Actually, for large files, the current logic is: 
+                    # 1. Physical Split -> 2. Transcribe -> 3. Structure (LLM) -> 4. Resulting Chunks.
+                    # The Resulting Chunks from LLM are currently "Virtual" segments of the Physical Chunk.
+                    # If LLM returns multiple chunks for one physical chunk, strictly speaking they all share the same physical audio?
+                    # OR, do we need to cut AGAIN based on LLM?
+                    # The prompt says: "Small files... cut based on LLM timestamps". 
+                    # For LARGE files: "Generated split (chunk) audio files... persist... link to each chunk".
+                    # The simplest interpretation of "persist the split files generated in process_large_file" is to use `chunk_filename`.
+                    # And assign that `chunk_filename` to all logical chunks derived from it.
+                    chunk["file_path"] = chunk_filename
                     final_chunks.append(chunk)
 
         except Exception as e:
-            print(f"Error in process_large_file: {e}")
+            self._log(f"Error in process_large_file: {e}")
             import traceback
             traceback.print_exc()
             raise e
-        finally:
-            print(f"Cleaning up temp dir: {temp_dir}")
-            shutil.rmtree(temp_dir)
-
+            
         return final_chunks
 
     def split_and_title(self, segments: List[Any]) -> List[Dict[str, Any]]:
@@ -262,6 +291,7 @@ class AudioProcessor:
         if not simplified_segments:
              return []
 
+        self._log(f"[OpenAI Request] Chat Completion (Structuring). Segments: {len(simplified_segments)}")
         response = self.client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -271,14 +301,17 @@ class AudioProcessor:
             response_format={"type": "json_object"}
         )
 
+
         content = response.choices[0].message.content
+        self._log(f"[OpenAI Response] Chat Completion result: {content[:30].replace(chr(10), ' ')}... (Length: {len(content)})")
+
         try:
             result = json.loads(content)
             chunks = result.get("chunks", [])
             
             # Check if chunks is a list
             if not isinstance(chunks, list):
-                print(f"Unexpected format for 'chunks': {type(chunks)}. Content: {content}")
+                self._log(f"Unexpected format for 'chunks': {type(chunks)}. Content: {content}")
                 return []
             
             # Validate each chunk is a dict with required keys
@@ -287,12 +320,12 @@ class AudioProcessor:
                 if isinstance(c, dict) and "start_time" in c and "end_time" in c:
                     valid_chunks.append(c)
                 else:
-                    print(f"Skipping invalid chunk format: {c}")
+                    self._log(f"Skipping invalid chunk format: {c}")
             
             return valid_chunks
 
         except json.JSONDecodeError:
-            print("Failed to decode JSON from LLM response")
+            self._log("Failed to decode JSON from LLM response")
             return []
 
     def process(self, file_path: str) -> List[Dict[str, Any]]:
@@ -300,16 +333,55 @@ class AudioProcessor:
         Orchestrates the transcription and splitting process.
         """
         file_size = os.path.getsize(file_path)
+        self._log(f"[Process Start] Overall processing for file: {file_path} (Size: {file_size / (1024*1024):.2f} MB)")
 
         if file_size > self.FILE_SIZE_LIMIT_BYTES:
-            print(f"File size {file_size} exceeds limit {self.FILE_SIZE_LIMIT_BYTES}. Using split processing.")
+            self._log(f"File size {file_size} exceeds limit {self.FILE_SIZE_LIMIT_BYTES}. Using split processing.")
             # Returns fully structured chunks
             chunks = self.process_large_file(file_path)
         else:
-            print(f"Processing small audio file: {file_path}")
-            print(f"[Progress] Step: Transcribing small file...")
+            self._log(f"Processing small audio file: {file_path}")
+            self._log(f"[Progress] Step: Transcribing small file...")
             segments = self.transcribe(file_path)
-            print(f"[Progress] Step: Structuring small file with LLM...")
+            self._log(f"[Progress] Step: Structuring small file with LLM...")
+            # Note: For small files, segments are relative to 0.0 of the file.
             chunks = self.split_and_title(segments)
 
+            # For small files, we now need to physically cut the file based on the LLM chunks
+            # Create a persistent directory for chunks
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            chunk_dir = os.path.join(self.CHUNKS_DIR, base_name)
+            os.makedirs(chunk_dir, exist_ok=True)
+
+            self._log(f"Generating physical audio files for {len(chunks)} chunks in {chunk_dir}...")
+            
+            for i, chunk in enumerate(chunks):
+                chunk_filename = os.path.join(chunk_dir, f"chunk_{i}.mp3")
+                start = chunk.get("start_time", 0.0)
+                end = chunk.get("end_time", 0.0)
+                
+                # If start/end are missing or invalid, fallback?
+                # LLM response returns start_time/end_time.
+                
+                self._log(f"Exporting small file chunk {i}: {start:.2f} to {end:.2f} -> {chunk_filename}")
+                cmd = [
+                    "ffmpeg", 
+                    "-v", "error",
+                    "-i", file_path,
+                    "-ss", str(start),
+                    "-to", str(end),
+                    "-c:a", "libmp3lame",
+                    "-q:a", "4",
+                    "-ac", "1",
+                    "-y",
+                    chunk_filename
+                ]
+                try:
+                    subprocess.run(cmd, check=True)
+                    chunk["file_path"] = chunk_filename
+                except Exception as e:
+                    self._log(f"Error cutting chunk {i}: {e}")
+                    chunk["file_path"] = None # Or handle error?
+
+        self._log(f"[Process End] Processing completed for file: {file_path}")
         return chunks
