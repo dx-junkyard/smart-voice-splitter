@@ -118,6 +118,8 @@ const DetailView: React.FC = () => {
     // Effect to handle auto-play when source changes
     useEffect(() => {
         if (shouldAutoPlay && audioRef.current) {
+            // 明示的にロードを呼び出し、新しいsrcの内容を確実に読み込ませる
+            audioRef.current.load();
             audioRef.current.play().catch(e => console.error("Auto-play failed", e));
             setShouldAutoPlay(false);
         }
@@ -140,7 +142,26 @@ const DetailView: React.FC = () => {
         const chunkUrl = getAudioUrl(chunk.file_path);
         console.log("chunkUrl", chunkUrl);
 
+        // Check if we are interacting with the already expanded chunk
+        if (expandedChunkId === chunk.id) {
+            if (audioRef.current) {
+                if (audioRef.current.paused) {
+                    audioRef.current.play();
+                } else {
+                    audioRef.current.pause();
+                }
+            }
+            // Update UI state only, without changing currentAudioSrc to avoid re-renders impacting audio
+            setCurrentPlayingChunkId(chunk.id);
+            return;
+        }
+
         if (currentAudioSrc === chunkUrl) {
+            // Case where src matches but maybe not expanded? (Should be covered above usually, but keep as fallback)
+            // Actually if src matches but not expanded, it means we are switching back to a chunk that was playing?
+            // If sticky player existed, yes. But now we have per-chunk players.
+            // If we play a chunk, it Auto-Expands.
+
             if (audioRef.current) {
                 if (audioRef.current.paused) {
                     audioRef.current.play();

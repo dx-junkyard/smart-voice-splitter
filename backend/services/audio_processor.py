@@ -231,24 +231,56 @@ class AudioProcessor:
                 local_chunks = self.split_and_title(segments)
                 
                 # Adjust timestamps to be absolute relative to the original file
-                for chunk in local_chunks:
+                # Adjust timestamps to be absolute relative to the original file
+                for j, chunk in enumerate(local_chunks):
+                    # Timestamps are relative to the start of the physical chunk (chunk_filename)
+                    seg_start = chunk.get("start_time", 0.0)
+                    seg_end = chunk.get("end_time", 0.0)
+                    
+                    # Create a specific audio file for this logical chunk
+                    sub_chunk_filename = os.path.join(chunk_dir, f"chunk_{i}_{j}.mp3")
+                    
+                    cmd = [
+                        "ffmpeg",
+                        "-v", "error",
+                        "-i", chunk_filename,
+                        "-ss", str(seg_start),
+                        # Use -t (duration) or -to. Since seg_start is relative to 0, -to seg_end works if input is read from 0.
+                        # However, -ss before -i is faster seeking but resets timestamps.
+                        # Here input is chunk_filename (starts at 0).
+                        # Using -ss after -i is frame-accurate but slower? 
+                        # For 10 min file, -ss before -i is fine. 
+                        # IF -ss before -i, timestamps reset to 0. So -to should be (seg_end - seg_start).
+                        # IF -ss after -i, timestamps are preserved? No, -ss outputs from 0.
+                        # Safest: -ss seg_start -to seg_end with -i input.
+                        # Wait, documentation says: "When used as an output option (before an output url), -to ... stops writing ... at position."
+                        # "When used as an input option... limits the duration of data read from input."
+                        # We want to cut FROM seg_start TO seg_end.
+                        # ffmpeg -i input -ss start -to end -c copy output
+                        "-ss", str(seg_start),
+                        "-to", str(seg_end),
+                        "-c:a", "libmp3lame",
+                        "-q:a", "4",
+                        "-ac", "1",
+                        "-y",
+                        sub_chunk_filename
+                    ]
+                    
+                    try:
+                        self._log(f"Exporting sub-chunk {i}-{j}: {seg_start:.2f}-{seg_end:.2f} -> {sub_chunk_filename}")
+                        subprocess.run(cmd, check=True)
+                        chunk["file_path"] = sub_chunk_filename
+                    except Exception as e:
+                        self._log(f"Error cutting sub-chunk {i}-{j}: {e}")
+                        # Fallback to the main chunk file? Or None? 
+                        # If we fallback, we have the same issue (plays from start).
+                        # Better to have broken audio than wrong audio? 
+                        # Or fallback to chunk_filename but user accepts the bug?
+                        # Let's fallback to chunk_filename for safety, but log error.
+                        chunk["file_path"] = chunk_filename
+
                     chunk["start_time"] += start
                     chunk["end_time"] += start
-                    # Save the file_path. For large files, we map one physical chunk to potential multiple logical chunks? 
-                    # Wait, the prompt says "file_path (String, nullable=True) to save split audio file path".
-                    # In process_large_file, we split by silence first (Physical Chunks), then Transcribe, then Structure (Logical Chunks).
-                    # The Physical Chunks are stuck here. But LLM might split the transcript further or combine?
-                    # "split_and_title" returns "chunks".
-                    # Actually, for large files, the current logic is: 
-                    # 1. Physical Split -> 2. Transcribe -> 3. Structure (LLM) -> 4. Resulting Chunks.
-                    # The Resulting Chunks from LLM are currently "Virtual" segments of the Physical Chunk.
-                    # If LLM returns multiple chunks for one physical chunk, strictly speaking they all share the same physical audio?
-                    # OR, do we need to cut AGAIN based on LLM?
-                    # The prompt says: "Small files... cut based on LLM timestamps". 
-                    # For LARGE files: "Generated split (chunk) audio files... persist... link to each chunk".
-                    # The simplest interpretation of "persist the split files generated in process_large_file" is to use `chunk_filename`.
-                    # And assign that `chunk_filename` to all logical chunks derived from it.
-                    chunk["file_path"] = chunk_filename
                     final_chunks.append(chunk)
 
         except Exception as e:
