@@ -1,7 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { getProfile, updateChunk, type Profile, type Chunk } from '../api';
-import { ArrowLeft, Clock, Play, Pause, Bookmark, ChevronDown, ChevronUp } from 'lucide-react';
+import WaveSurfer from 'wavesurfer.js';
+import { getProfile, updateChunk, type Profile } from '../api';
+import {
+    ArrowLeft,
+    Play,
+    Pause,
+    RotateCcw,
+    Bookmark
+} from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -13,22 +20,41 @@ const DetailView: React.FC = () => {
     const { profileId } = useParams<{ profileId: string }>();
     const [profile, setProfile] = useState<Profile | null>(null);
     const [loading, setLoading] = useState(true);
-    // currentChunkId tracks which chunk corresponds to current playback time
-    const [currentPlayingChunkId, setCurrentPlayingChunkId] = useState<number | null>(null);
-    // expandedChunkId tracks which accordion item is open
-    const [expandedChunkId, setExpandedChunkId] = useState<number | null>(null);
+
+    // Player state
+    const [isPlaying, setIsPlaying] = useState(false);
     const [currentTime, setCurrentTime] = useState(0);
-    // Map of chunkId -> note draft
+    const [duration, setDuration] = useState(0);
+    const [playbackRate, setPlaybackRate] = useState(1.0);
+
+    // A-B Loop state
+    const [loopStart, setLoopStart] = useState<number | null>(null);
+    const [loopEnd, setLoopEnd] = useState<number | null>(null);
+    const [isLooping, setIsLooping] = useState(false);
+
+    // References
+    const waveformRef = useRef<HTMLDivElement>(null);
+    const wavesurferRef = useRef<WaveSurfer | null>(null);
+    const activeChunkRef = useRef<HTMLDivElement | null>(null);
+    const loopStateRef = useRef({ loopStart, loopEnd, isLooping });
+
+    // Data handling
     const [noteDrafts, setNoteDrafts] = useState<Record<number, string>>({});
     const [savingStatus, setSavingStatus] = useState<Record<number, 'saving' | 'saved' | null>>({});
-
-    const audioRef = useRef<HTMLAudioElement>(null);
     const notesDebounceRefs = useRef<Record<number, NodeJS.Timeout>>({});
-    const chunkRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
-    // Assuming first recording for now
     const recording = profile?.recordings[0];
     const chunks = recording?.chunks || [];
+
+    const getAudioUrl = (filePath: string | null) => {
+        if (!filePath) return '';
+        const relativePath = filePath.replace(/^uploads\//, '');
+        return `http://localhost:8000/static/${relativePath}`;
+    };
+
+    useEffect(() => {
+        loopStateRef.current = { loopStart, loopEnd, isLooping };
+    }, [loopStart, loopEnd, isLooping]);
 
     useEffect(() => {
         if (profileId) {
@@ -36,45 +62,11 @@ const DetailView: React.FC = () => {
         }
     }, [profileId]);
 
-    // Cleanup debounces on unmount
-    useEffect(() => {
-        return () => {
-            Object.values(notesDebounceRefs.current).forEach(timeout => clearTimeout(timeout));
-        };
-    }, []);
-
-    // Sync current time with active chunk and scroll - DISABLED due to chunk playback logic change
-    // Since we play individual files, currentTime is 0..duration of chunk, not global time.
-    // relying on manual selection for currentPlayingChunkId.
-    /*
-    useEffect(() => {
-        if (!recording) return;
-
-        const playingChunk = chunks.find(
-            c => currentTime >= c.start_time && currentTime < c.end_time
-        );
-
-        if (playingChunk && playingChunk.id !== currentPlayingChunkId) {
-            setCurrentPlayingChunkId(playingChunk.id);
-            setExpandedChunkId(playingChunk.id);
-
-            // Auto-scroll
-            if (chunkRefs.current[playingChunk.id]) {
-                chunkRefs.current[playingChunk.id]?.scrollIntoView({
-                    behavior: 'smooth',
-                    block: 'center'
-                });
-            }
-        }
-    }, [currentTime, recording, chunks, currentPlayingChunkId]);
-    */
-
     const fetchProfile = async (id: number) => {
         try {
             const data = await getProfile(id);
             setProfile(data);
 
-            // Initialize note drafts
             const drafts: Record<number, string> = {};
             data.recordings.forEach(r => {
                 r.chunks.forEach(c => {
@@ -82,11 +74,6 @@ const DetailView: React.FC = () => {
                 });
             });
             setNoteDrafts(drafts);
-
-            if (data.recordings.length > 0 && data.recordings[0].chunks.length > 0) {
-                // Optionally start with first one open?
-                setExpandedChunkId(data.recordings[0].chunks[0].id);
-            }
         } catch (error) {
             console.error('Failed to fetch profile', error);
         } finally {
@@ -94,121 +81,123 @@ const DetailView: React.FC = () => {
         }
     };
 
-    const getAudioUrl = (filePath: string | null) => {
-        if (!filePath) return '';
-        // Convert path logic: uploads/... -> /static/...
-        const relativePath = filePath.replace(/^uploads\//, '');
-        return `http://localhost:8000/static/${relativePath}`;
-    };
-
-    const [currentAudioSrc, setCurrentAudioSrc] = useState<string>('');
-    const [shouldAutoPlay, setShouldAutoPlay] = useState(false);
-
     useEffect(() => {
-        if (recording?.file_path) {
-            // Default to original file if no specific chunk selected
-            // But if we already have a specialized src (from user action), don't overwrite it roughly?
-            // Actually, safe to reset on profile load.
-            if (!currentAudioSrc) {
-                setCurrentAudioSrc(getAudioUrl(recording.file_path));
-            }
-        }
-    }, [recording]);
+        if (!waveformRef.current || !recording?.file_path) return;
 
-    // Effect to handle auto-play when source changes
-    useEffect(() => {
-        if (shouldAutoPlay && audioRef.current) {
-            // 明示的にロードを呼び出し、新しいsrcの内容を確実に読み込ませる
-            audioRef.current.load();
-            audioRef.current.play().catch(e => console.error("Auto-play failed", e));
-            setShouldAutoPlay(false);
-        }
-    }, [currentAudioSrc, shouldAutoPlay]);
+        const ws = WaveSurfer.create({
+            container: waveformRef.current,
+            waveColor: '#D1D5DB',
+            progressColor: '#3B82F6',
+            cursorColor: '#EF4444',
+            barWidth: 2,
+            barGap: 1,
+            barRadius: 2,
+            height: 128,
+            normalize: true,
+            minPxPerSec: 50,
+            url: getAudioUrl(recording.file_path),
+        });
 
+        wavesurferRef.current = ws;
 
-    const handleTimeUpdate = () => {
-        if (audioRef.current) {
-            setCurrentTime(audioRef.current.currentTime);
-        }
-    };
+        ws.on('ready', () => {
+            setDuration(ws.getDuration());
+        });
 
-    const togglePlayback = (e: React.MouseEvent, chunk: Chunk) => {
-        e.stopPropagation();
-        if (!chunk.file_path) {
-            console.warn("Missing chunk file path", chunk);
-            return;
-        }
+        ws.on('play', () => setIsPlaying(true));
+        ws.on('pause', () => setIsPlaying(false));
 
-        const chunkUrl = getAudioUrl(chunk.file_path);
-        console.log("chunkUrl", chunkUrl);
+        ws.on('timeupdate', (currentTime) => {
+            setCurrentTime(currentTime);
 
-        // Check if we are interacting with the already expanded chunk
-        if (expandedChunkId === chunk.id) {
-            if (audioRef.current) {
-                if (audioRef.current.paused) {
-                    audioRef.current.play();
-                } else {
-                    audioRef.current.pause();
+            const { loopStart, loopEnd, isLooping } = loopStateRef.current;
+            if (isLooping && loopStart !== null && loopEnd !== null) {
+                if (currentTime >= loopEnd) {
+                    ws.setTime(loopStart);
                 }
             }
-            // Update UI state only, without changing currentAudioSrc to avoid re-renders impacting audio
-            setCurrentPlayingChunkId(chunk.id);
-            return;
+        });
+
+        ws.on('finish', () => {
+            setIsPlaying(false);
+        });
+
+        return () => {
+            ws.destroy();
+            wavesurferRef.current = null;
+        };
+    }, [recording?.file_path]);
+
+    const currentChunkId = chunks.find(
+        c => currentTime >= c.start_time && currentTime < c.end_time
+    )?.id;
+
+    useEffect(() => {
+        if (currentChunkId && activeChunkRef.current) {
+            activeChunkRef.current.scrollIntoView({
+                behavior: 'smooth',
+                block: 'center',
+            });
         }
+    }, [currentChunkId]);
 
-        if (currentAudioSrc === chunkUrl) {
-            // Case where src matches but maybe not expanded? (Should be covered above usually, but keep as fallback)
-            // Actually if src matches but not expanded, it means we are switching back to a chunk that was playing?
-            // If sticky player existed, yes. But now we have per-chunk players.
-            // If we play a chunk, it Auto-Expands.
-
-            if (audioRef.current) {
-                if (audioRef.current.paused) {
-                    audioRef.current.play();
-                } else {
-                    audioRef.current.pause();
-                }
-            }
-        } else {
-            setCurrentAudioSrc(chunkUrl);
-            setShouldAutoPlay(true);
-        }
-
-        setExpandedChunkId(chunk.id);
-        setCurrentPlayingChunkId(chunk.id);
+    const togglePlay = () => {
+        wavesurferRef.current?.playPause();
     };
 
-    // Check if audio is actually playing (for UI state)
-    // We need a state for "global playing" to toggle icons correctly
-    const [isAudioPlaying, setIsAudioPlaying] = useState(false);
-
-    const onPlay = () => setIsAudioPlaying(true);
-    const onPause = () => setIsAudioPlaying(false);
-
-    const toggleAccordion = (chunkId: number) => {
-        setExpandedChunkId(prev => (prev === chunkId ? null : chunkId));
+    const skipBackward = () => {
+        wavesurferRef.current?.skip(-5);
     };
 
-    const toggleBookmark = async (e: React.MouseEvent, chunkId: number) => {
+    const handleSpeedChange = (speed: number) => {
+        setPlaybackRate(speed);
+        wavesurferRef.current?.setPlaybackRate(speed);
+    };
+
+    const handleSetLoopA = () => {
+        setLoopStart(currentTime);
+        setIsLooping(true);
+    };
+
+    const handleSetLoopB = () => {
+        if (loopStart !== null && currentTime > loopStart) {
+            setLoopEnd(currentTime);
+            setIsLooping(true);
+        }
+    };
+
+    const clearLoop = () => {
+        setLoopStart(null);
+        setLoopEnd(null);
+        setIsLooping(false);
+    };
+
+    const handleChunkClick = (startTime: number) => {
+        wavesurferRef.current?.setTime(startTime);
+        wavesurferRef.current?.play();
+    };
+
+    const handleBookmark = async (e: React.MouseEvent, chunkId: number) => {
         e.stopPropagation();
         if (!profile) return;
 
-        // Optimistic update
+        const chunk = chunks.find(c => c.id === chunkId);
+        if (!chunk) return;
+
+        const newStatus = !chunk.is_bookmarked;
+
         const updatedRecordings = profile.recordings.map(r => ({
             ...r,
             chunks: r.chunks.map(c =>
-                c.id === chunkId ? { ...c, is_bookmarked: !c.is_bookmarked } : c
+                c.id === chunkId ? { ...c, is_bookmarked: newStatus } : c
             )
         }));
-
-        const wasBookmarked = updatedRecordings[0].chunks.find(c => c.id === chunkId)?.is_bookmarked;
         setProfile({ ...profile, recordings: updatedRecordings });
 
         try {
-            await updateChunk(chunkId, { is_bookmarked: wasBookmarked });
+            await updateChunk(chunkId, { is_bookmarked: newStatus });
         } catch (err) {
-            console.error("Failed to toggle bookmark", err);
-            // Revert on error would be ideal here
+            console.error("Failed to update bookmark", err);
         }
     };
 
@@ -216,273 +205,194 @@ const DetailView: React.FC = () => {
         setNoteDrafts(prev => ({ ...prev, [chunkId]: newNote }));
         setSavingStatus(prev => ({ ...prev, [chunkId]: 'saving' }));
 
-        // Clear existing debounce for this chunk
         if (notesDebounceRefs.current[chunkId]) {
             clearTimeout(notesDebounceRefs.current[chunkId]);
         }
 
-        // Set new debounce
         notesDebounceRefs.current[chunkId] = setTimeout(async () => {
             try {
                 await updateChunk(chunkId, { user_note: newNote });
                 setSavingStatus(prev => ({ ...prev, [chunkId]: 'saved' }));
-                // Clear 'saved' message after 2 seconds
-                setTimeout(() => {
-                    setSavingStatus(prev => ({ ...prev, [chunkId]: null }));
-                }, 2000);
+                setTimeout(() => setSavingStatus(prev => ({ ...prev, [chunkId]: null })), 2000);
             } catch (err) {
                 console.error("Failed to save note", err);
-                // Ideally show error state
             }
-        }, 1000); // 1 second debounce
+        }, 1000);
     };
 
-    const formatDuration = (start: number, end: number) => {
-        const duration = end - start;
-        const m = Math.floor(duration / 60);
-        const s = Math.floor(duration % 60);
-        return `${m}m ${s}s`;
-    };
 
-    const formatTimestamp = (seconds: number) => {
-        const m = Math.floor(seconds / 60);
-        const s = Math.floor(seconds % 60);
-        return `${m}:${s.toString().padStart(2, '0')}`;
-    }
-
-    if (loading) return <div className="p-8 text-center">Loading...</div>;
-    if (!profile) return <div className="p-8 text-center text-red-500">Profile not found</div>;
-
-    // Use currentAudioSrc or fallback, but sticky player uses currentAudioSrc state
-    // const audioFilename = recording?.file_path.split('/').pop();
-    // const audioUrl = `http://localhost:8000/static/${audioFilename}`;
+    if (loading) return <div className="flex items-center justify-center h-screen">Loading...</div>;
+    if (!profile) return <div className="flex items-center justify-center h-screen text-red-500">Profile not found</div>;
 
     return (
         <div className="flex flex-col h-screen bg-gray-50">
-            {/* Header */}
-            <header className="bg-white border-b border-gray-200 px-6 py-4 flex items-center shadow-sm z-20 sticky top-0">
-                <Link to="/" className="text-gray-500 hover:text-gray-800 mr-4">
-                    <ArrowLeft size={24} />
-                </Link>
-                <div>
-                    <h1 className="text-xl font-bold text-gray-900">{profile.title}</h1>
-                    <div className="text-sm text-gray-500 flex items-center">
-                        <Clock size={14} className="mr-1" />
-                        {new Date(profile.recorded_at).toLocaleString()}
+            <div className="flex-none bg-white shadow-md z-10 border-b border-gray-200">
+                <div className="px-6 py-3 border-b border-gray-100 flex items-center justify-between">
+                    <div className="flex items-center">
+                        <Link to="/" className="text-gray-500 hover:text-gray-800 mr-4 p-1 rounded-full hover:bg-gray-100">
+                            <ArrowLeft size={20} />
+                        </Link>
+                        <div>
+                            <h1 className="text-lg font-bold text-gray-900 truncate max-w-md">{profile.title}</h1>
+                        </div>
+                    </div>
+                    <div className="text-sm text-gray-500 font-mono">
+                         {new Date(currentTime * 1000).toISOString().substr(14, 5)} / {new Date(duration * 1000).toISOString().substr(14, 5)}
                     </div>
                 </div>
-            </header>
 
-            {/* Content List */}
-            <main className="flex-1 overflow-y-auto p-4 max-w-3xl mx-auto w-full">
-                <div className="space-y-4">
-                    {/* Full Recording Item */}
+                <div className="px-6 py-4 bg-gray-50">
                     <div
-                        className={cn(
-                            "bg-white rounded-lg border transition-all duration-300 overflow-hidden",
-                            expandedChunkId === -1 || (isAudioPlaying && currentPlayingChunkId === -1)
-                                ? "border-blue-300 shadow-md ring-1 ring-blue-100"
-                                : "border-gray-200 hover:border-gray-300"
-                        )}
-                    >
-                        <div
-                            className="p-4 flex items-center cursor-pointer hover:bg-gray-50 transition-colors"
-                            onClick={() => toggleAccordion(-1)}
+                        ref={waveformRef}
+                        className="w-full"
+                        style={{ height: '128px' }}
+                    ></div>
+                </div>
+
+                <div className="px-6 py-4 flex flex-wrap items-center justify-between gap-4">
+                    <div className="flex items-center gap-4">
+                        <button
+                            onClick={skipBackward}
+                            className="p-2 text-gray-600 hover:bg-gray-100 rounded-full transition-colors"
+                            title="5秒戻る"
                         >
-                            {/* Play Button */}
-                            <button
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (!recording?.file_path) return;
+                            <RotateCcw size={20} />
+                            <span className="sr-only">5秒戻る</span>
+                        </button>
 
-                                    const chunkUrl = getAudioUrl(recording.file_path);
-                                    if (currentAudioSrc === chunkUrl) {
-                                        if (audioRef.current) {
-                                            if (audioRef.current.paused) audioRef.current.play();
-                                            else audioRef.current.pause();
-                                        }
-                                    } else {
-                                        setCurrentAudioSrc(chunkUrl);
-                                        setShouldAutoPlay(true);
-                                    }
-                                    setExpandedChunkId(-1);
-                                    setCurrentPlayingChunkId(-1);
-                                }}
-                                className={cn(
-                                    "flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center mr-4 transition-colors",
-                                    isAudioPlaying && currentPlayingChunkId === -1
-                                        ? "bg-blue-600 text-white"
-                                        : "bg-blue-100 text-blue-600 hover:bg-blue-200"
-                                )}
-                            >
-                                {isAudioPlaying && currentPlayingChunkId === -1 ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" className="ml-0.5" />}
-                            </button>
+                        <button
+                            onClick={togglePlay}
+                            className="w-12 h-12 bg-blue-600 hover:bg-blue-700 text-white rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-95"
+                        >
+                            {isPlaying ? <Pause size={24} fill="currentColor" /> : <Play size={24} fill="currentColor" className="ml-1" />}
+                        </button>
 
-                            <div className="flex-1 min-w-0 mr-4">
-                                <div className="flex items-center justify-between mb-1">
-                                    <h3 className="text-base font-semibold text-gray-900 truncate">
-                                        Full Recording
-                                    </h3>
-                                    <span className="text-xs font-mono text-gray-400">
-                                        {formatDuration(0, profile.recordings[0]?.duration || 0)}
-                                    </span>
-                                </div>
-                                <div className="text-sm text-gray-500">
-                                    Original audio file
-                                </div>
-                            </div>
-                            <div className="text-gray-400">
-                                {expandedChunkId === -1 ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
-                            </div>
+                        <div className="flex items-center bg-gray-100 rounded-lg p-1 text-sm font-medium">
+                            {[0.5, 0.75, 1.0].map((rate) => (
+                                <button
+                                    key={rate}
+                                    onClick={() => handleSpeedChange(rate)}
+                                    className={cn(
+                                        "px-2 py-1 rounded transition-colors",
+                                        playbackRate === rate ? "bg-white text-blue-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
+                                    )}
+                                >
+                                    {rate === 1 ? '1.0' : rate}x
+                                </button>
+                            ))}
                         </div>
-
-                        {expandedChunkId === -1 && (
-                            <div className="border-t border-gray-100 bg-gray-50/50">
-                                <div className="p-6">
-                                    <audio
-                                        ref={currentPlayingChunkId === -1 ? audioRef : null}
-                                        controls
-                                        className="w-full"
-                                        src={getAudioUrl(recording?.file_path || '')}
-                                        preload="metadata"
-                                        onTimeUpdate={handleTimeUpdate}
-                                        onPlay={onPlay}
-                                        onPause={onPause}
-                                    />
-                                </div>
-                            </div>
-                        )}
                     </div>
 
-                    {chunks.map((chunk) => {
-                        const isExpanded = expandedChunkId === chunk.id;
-                        const isPlaying = isAudioPlaying && currentPlayingChunkId === chunk.id;
-                        const isBookmarked = chunk.is_bookmarked;
+                    <div className="flex items-center gap-2 bg-gray-50 p-1.5 rounded-lg border border-gray-200">
+                         <span className="text-xs font-bold text-gray-400 px-2 uppercase tracking-wider">リピート</span>
+                         <button
+                             onClick={handleSetLoopA}
+                             className={cn(
+                                 "px-3 py-1.5 text-xs font-medium rounded transition-colors",
+                                 loopStart !== null ? "bg-blue-100 text-blue-700 ring-1 ring-blue-300" : "bg-white text-gray-600 border border-gray-200 hover:bg-gray-50"
+                             )}
+                         >
+                             {loopStart !== null ? `A: ${loopStart.toFixed(1)}s` : 'A地点設定'}
+                         </button>
 
+                         <button
+                             onClick={handleSetLoopB}
+                             disabled={loopStart === null}
+                             className={cn(
+                                 "px-3 py-1.5 text-xs font-medium rounded transition-colors",
+                                 loopEnd !== null ? "bg-blue-100 text-blue-700 ring-1 ring-blue-300" : "bg-white text-gray-600 border border-gray-200 hover:bg-gray-50",
+                                 loopStart === null && "opacity-50 cursor-not-allowed"
+                             )}
+                         >
+                             {loopEnd !== null ? `B: ${loopEnd.toFixed(1)}s` : 'B地点設定'}
+                         </button>
+
+                         {(loopStart !== null || loopEnd !== null) && (
+                             <button
+                                 onClick={clearLoop}
+                                 className="px-2 py-1.5 text-xs text-red-500 hover:bg-red-50 rounded"
+                             >
+                                 解除
+                             </button>
+                         )}
+                    </div>
+                </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto bg-gray-100 p-4">
+                <div className="max-w-4xl mx-auto space-y-3">
+                    {chunks.map((chunk) => {
+                        const isActive = currentChunkId === chunk.id;
                         return (
                             <div
                                 key={chunk.id}
-                                ref={el => chunkRefs.current[chunk.id] = el}
+                                ref={isActive ? activeChunkRef : null}
                                 className={cn(
-                                    "bg-white rounded-lg border transition-all duration-300 overflow-hidden",
-                                    isExpanded || isPlaying
-                                        ? "border-blue-300 shadow-md ring-1 ring-blue-100"
+                                    "bg-white rounded-lg p-4 border transition-all duration-300 shadow-sm",
+                                    isActive
+                                        ? "border-blue-500 ring-2 ring-blue-100 shadow-md"
                                         : "border-gray-200 hover:border-gray-300"
                                 )}
                             >
-                                {/* Header / Summary Card */}
-                                <div
-                                    className="p-4 flex items-center cursor-pointer hover:bg-gray-50 transition-colors"
-                                    onClick={() => toggleAccordion(chunk.id)}
-                                >
-                                    {/* Play Button - sends to Sticky Player */}
+                                <div className="flex gap-4">
                                     <button
-                                        onClick={(e) => togglePlayback(e, chunk)}
+                                        onClick={() => handleChunkClick(chunk.start_time)}
                                         className={cn(
-                                            "flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center mr-4 transition-colors",
-                                            isPlaying
+                                            "flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-colors mt-1",
+                                            isActive
                                                 ? "bg-blue-600 text-white"
-                                                : "bg-blue-100 text-blue-600 hover:bg-blue-200"
+                                                : "bg-blue-50 text-blue-600 hover:bg-blue-100"
                                         )}
                                     >
-                                        {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" className="ml-0.5" />}
+                                        <Play size={14} fill="currentColor" className="ml-0.5" />
                                     </button>
 
-                                    {/* Info */}
-                                    <div className="flex-1 min-w-0 mr-4">
-                                        <div className="flex items-center justify-between mb-1">
-                                            <h3 className="text-base font-semibold text-gray-900 truncate">
-                                                {chunk.title}
-                                            </h3>
-                                            <span className="text-xs font-mono text-gray-400">
-                                                {formatDuration(chunk.start_time, chunk.end_time)}
-                                            </span>
+                                    <div className="flex-1 min-w-0">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-xs font-mono text-gray-400 bg-gray-50 px-1.5 py-0.5 rounded border border-gray-100">
+                                                    {new Date(chunk.start_time * 1000).toISOString().substr(14, 5)}
+                                                </span>
+                                                <h3 className={cn("font-medium", isActive ? "text-blue-900" : "text-gray-900")}>
+                                                    {chunk.title}
+                                                </h3>
+                                            </div>
+                                            <button
+                                                onClick={(e) => handleBookmark(e, chunk.id)}
+                                                className={cn(
+                                                    "text-gray-300 hover:text-yellow-500 transition-colors",
+                                                    chunk.is_bookmarked && "text-yellow-500"
+                                                )}
+                                            >
+                                                <Bookmark size={18} fill={chunk.is_bookmarked ? "currentColor" : "none"} />
+                                            </button>
                                         </div>
-                                        <div className="flex items-center text-sm text-gray-500">
-                                            <span className="font-mono text-xs bg-gray-100 px-1.5 rounded mr-2">
-                                                {formatTimestamp(chunk.start_time)}
-                                            </span>
-                                            <span className="truncate">
-                                                {chunk.transcript.slice(0, 50)}{chunk.transcript.length > 50 ? '...' : ''}
-                                            </span>
-                                        </div>
-                                    </div>
 
-                                    {/* Actions */}
-                                    <div className="flex items-center space-x-2">
-                                        <button
-                                            onClick={(e) => toggleBookmark(e, chunk.id)}
-                                            className={cn(
-                                                "p-2 rounded-full transition-colors focus:outline-none",
-                                                isBookmarked
-                                                    ? "text-yellow-500 hover:bg-yellow-50"
-                                                    : "text-gray-300 hover:text-gray-400 hover:bg-gray-100"
-                                            )}
-                                        >
-                                            <Bookmark size={20} fill={isBookmarked ? "currentColor" : "none"} />
-                                        </button>
-                                        <div className="text-gray-400">
-                                            {isExpanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+                                        <p className="text-gray-800 text-sm leading-relaxed mb-3">
+                                            {chunk.transcript}
+                                        </p>
+
+                                        <div className="bg-gray-50 rounded-md p-2 border border-gray-100 focus-within:border-blue-200 focus-within:ring-1 focus-within:ring-blue-100 transition-all">
+                                            <textarea
+                                                value={noteDrafts[chunk.id] || ''}
+                                                onChange={(e) => handleNoteChange(chunk.id, e.target.value)}
+                                                placeholder="Take notes..."
+                                                className="w-full bg-transparent border-none text-sm focus:ring-0 p-0 resize-none min-h-[40px] text-gray-600 placeholder-gray-400"
+                                            />
+                                            <div className="flex justify-end h-4">
+                                                <span className="text-[10px] text-blue-500 font-medium">
+                                                    {savingStatus[chunk.id] === 'saving' && 'Saving...'}
+                                                    {savingStatus[chunk.id] === 'saved' && 'Saved'}
+                                                </span>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
-
-                                {/* Body / Detailed View */}
-                                {isExpanded && (
-                                    <div className="border-t border-gray-100 bg-gray-50/50">
-                                        <div className="p-6">
-                                            {/* Per-Chunk Audio Player */}
-                                            <div className="mb-4">
-                                                <audio
-                                                    ref={isExpanded ? audioRef : null}
-                                                    controls
-                                                    className="w-full"
-                                                    src={getAudioUrl(chunk.file_path)}
-                                                    preload="metadata"
-                                                    onTimeUpdate={handleTimeUpdate}
-                                                    onPlay={onPlay}
-                                                    onPause={onPause}
-                                                />
-                                            </div>
-
-                                            <div className="grid gap-6 md:grid-cols-2">
-                                                {/* Full Transcript */}
-                                                <div>
-                                                    <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-                                                        Transcript
-                                                    </h4>
-                                                    <p className="text-gray-700 leading-relaxed text-sm whitespace-pre-wrap">
-                                                        {chunk.transcript}
-                                                    </p>
-                                                </div>
-
-                                                {/* Notes */}
-                                                <div className="flex flex-col h-full">
-                                                    <div className="flex items-center justify-between mb-2">
-                                                        <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
-                                                            Notes
-                                                        </h4>
-                                                        <span className="text-xs text-blue-600 h-4">
-                                                            {savingStatus[chunk.id] === 'saving' && 'Saving...'}
-                                                            {savingStatus[chunk.id] === 'saved' && 'Saved'}
-                                                        </span>
-                                                    </div>
-                                                    <textarea
-                                                        className="flex-1 w-full p-3 border border-gray-200 rounded-md text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none min-h-[150px]"
-                                                        placeholder="Add your notes here..."
-                                                        value={noteDrafts[chunk.id] || ''}
-                                                        onChange={(e) => handleNoteChange(chunk.id, e.target.value)}
-                                                    />
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
                             </div>
                         );
                     })}
                 </div>
-            </main>
+            </div>
         </div>
     );
 };
