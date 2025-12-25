@@ -121,9 +121,6 @@ const Dashboard: React.FC = () => {
               const status = recording?.status || 'pending';
               // Previous data might have no status but have chunks (completed) or 0 chunks (failed/pending)
               // If status is present, use it. If not, infer.
-              const inferredStatus = status === 'pending' && (!recording || recording.chunks.length === 0)
-                ? 'failed' // assume failed if no chunks and no explicit status/pending
-                : status;
 
               // If we have status, trust it. "pending" usually means default, "processing", "completed", "failed".
               // If old data (no status column in DB yet migrated to default='completed'), check chunks.

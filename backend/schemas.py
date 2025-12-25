@@ -2,6 +2,20 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 
+# Tag Schemas
+class TagBase(BaseModel):
+    name: str
+    color: Optional[str] = None
+
+class TagCreate(TagBase):
+    pass
+
+class Tag(TagBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
 # Chunk Schemas
 class ChunkBase(BaseModel):
     title: str
@@ -19,6 +33,7 @@ class Chunk(ChunkBase):
     recording_id: int
     file_path: Optional[str]
     is_bookmarked: bool
+    tags: List[Tag] = []
 
     class Config:
         from_attributes = True
@@ -60,3 +75,4 @@ class Profile(ProfileBase):
 class ChunkUpdate(BaseModel):
     user_note: Optional[str] = None
     is_bookmarked: Optional[bool] = None
+    tags: Optional[List[int]] = None # List of Tag IDs

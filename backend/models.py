@@ -1,7 +1,24 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Text
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Text, Table
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
+
+# Association Table for Chunk and Tag
+chunk_tags = Table(
+    "chunk_tags",
+    Base.metadata,
+    Column("chunk_id", Integer, ForeignKey("chunks.id"), primary_key=True),
+    Column("tag_id", Integer, ForeignKey("tags.id"), primary_key=True)
+)
+
+class Tag(Base):
+    __tablename__ = "tags"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, nullable=False)
+    color = Column(String, nullable=True)
+
+    chunks = relationship("Chunk", secondary=chunk_tags, back_populates="tags")
 
 class Profile(Base):
     __tablename__ = "profiles"
@@ -41,3 +58,4 @@ class Chunk(Base):
     is_bookmarked = Column(Integer, default=False) # storing boolean as 0/1 or boolean type if supported, SQLAlchemy Boolean maps to appropriate type
 
     recording = relationship("Recording", back_populates="chunks")
+    tags = relationship("Tag", secondary=chunk_tags, back_populates="chunks")
