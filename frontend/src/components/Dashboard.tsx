@@ -30,14 +30,15 @@ const Dashboard: React.FC = () => {
   };
 
   const totalChunks = useMemo(
-    () => profiles.reduce((acc, p) => acc + (p.recordings[0]?.chunks.length || 0), 0),
+    () => profiles.reduce((acc, p) => acc + (p.recordings[0]?.chunks.filter((c) => c.should_process).length || 0), 0),
     [profiles],
   );
 
   const singingChunks = useMemo(
     () =>
       profiles.reduce(
-        (acc, p) => acc + (p.recordings[0]?.chunks.filter((c) => c.content_type === 'singing').length || 0),
+        (acc, p) =>
+          acc + (p.recordings[0]?.chunks.filter((c) => c.content_type === 'singing' && c.should_process).length || 0),
         0,
       ),
     [profiles],
@@ -111,9 +112,10 @@ const Dashboard: React.FC = () => {
           {profiles.map((profile) => {
             const recording = profile.recordings[0];
             const status = recording?.status || 'pending';
-            const isProcessing = status === 'processing' || retryingIds.has(profile.id);
+            const isProcessing = status === 'processing' || status === 'splitting' || retryingIds.has(profile.id);
+            const isAwaitingSelection = status === 'awaiting_selection';
             const showRetry = recording && !isProcessing && (status === 'failed' || (status === 'completed' && recording.chunks.length === 0));
-            const songCount = recording?.chunks.filter((c) => c.content_type === 'singing').length || 0;
+            const songCount = recording?.chunks.filter((c) => c.content_type === 'singing' && c.should_process).length || 0;
 
             return (
               <Link
@@ -142,14 +144,19 @@ const Dashboard: React.FC = () => {
                 {profile.summary && <p className="mb-4 line-clamp-3 text-sm text-slate-200/80">{profile.summary}</p>}
 
                 <div className="mb-4 flex items-center gap-2 text-xs text-indigo-100">
-                  <span className="rounded-full bg-indigo-500/30 px-2 py-1">Chunk: {recording?.chunks.length || 0}</span>
+                  <span className="rounded-full bg-indigo-500/30 px-2 py-1">Chunk: {recording?.chunks.filter((c) => c.should_process).length || 0}</span>
                   <span className="rounded-full bg-fuchsia-500/30 px-2 py-1">🎵 {songCount}</span>
                 </div>
 
                 {isProcessing ? (
                   <div className="mt-4 flex items-center text-sm font-medium text-amber-300">
                     <RefreshCw size={16} className="mr-1 animate-spin" />
-                    Processing...
+                    {status === 'splitting' ? 'Splitting chunks...' : 'Processing...'}
+                  </div>
+                ) : isAwaitingSelection ? (
+                  <div className="mt-4 flex items-center text-sm font-medium text-sky-300">
+                    <AlertCircle size={16} className="mr-1" />
+                    Select target chunks
                   </div>
                 ) : showRetry ? (
                   <div className="mt-4 flex items-center gap-4">

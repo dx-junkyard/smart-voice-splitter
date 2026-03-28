@@ -483,3 +483,93 @@ class AudioProcessor:
 
         self._log(f"[Process End] Processing completed for file: {file_path}")
         return chunks
+
+    def split_audio_only(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Split audio into physical chunks only (no transcription/LLM).
+        """
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        chunk_dir = os.path.join(self.CHUNKS_DIR, base_name)
+        os.makedirs(chunk_dir, exist_ok=True)
+
+        total_duration = self._get_audio_duration(file_path)
+        if total_duration <= 0:
+            return []
+
+        silences = self._detect_silence_intervals(file_path)
+        split_points = self._determine_split_points(total_duration, silences)
+        points = [0.0] + split_points + [total_duration]
+
+        chunks: List[Dict[str, Any]] = []
+        for i in range(len(points) - 1):
+            start = points[i]
+            end = points[i + 1]
+            if (end - start) < 0.1:
+                continue
+
+            chunk_filename = os.path.join(chunk_dir, f"chunk_{i}.mp3")
+            cmd = [
+                "ffmpeg",
+                "-v", "error",
+                "-i", file_path,
+                "-ss", str(start),
+                "-to", str(end),
+                "-c:a", "libmp3lame",
+                "-q:a", "4",
+                "-ac", "1",
+                "-y",
+                chunk_filename,
+            ]
+            subprocess.run(cmd, check=True)
+
+            chunks.append(
+                {
+                    "title": f"Chunk {i + 1}",
+                    "transcript": "",
+                    "start_time": start,
+                    "end_time": end,
+                    "file_path": chunk_filename,
+                    "content_type": "speech",
+                    "should_process": True,
+                }
+            )
+
+        return chunks
+
+    def process_single_chunk(self, chunk_file_path: str, index: int = 0) -> Dict[str, Any]:
+        """
+        Process one already-split chunk file (transcribe + classify).
+        """
+        segments = self.transcribe_with_retry(chunk_file_path)
+        texts = []
+        for s in segments:
+            if isinstance(s, dict):
+                text = str(s.get("text", "")).strip()
+            else:
+                text = str(getattr(s, "text", "")).strip()
+            if text:
+                texts.append(text)
+
+        transcript = " ".join(texts).strip()
+        if transcript:
+            preview = transcript[:24]
+            title = f"Chunk {index + 1}: {preview}{'…' if len(transcript) > 24 else ''}"
+        else:
+            title = f"Chunk {index + 1}"
+
+        audio_features = self._extract_audio_features(chunk_file_path)
+        content_type, _reasons = self._classify_chunk_content(
+            transcript=transcript,
+            start_time=0.0,
+            end_time=max(0.0, self._get_audio_duration(chunk_file_path)),
+            audio_features=audio_features,
+        )
+
+        if content_type == "singing" and not title.startswith("🎵"):
+            title = f"🎵 {title}"
+
+        return {
+            "title": title,
+            "transcript": transcript,
+            "content_type": content_type,
+        }

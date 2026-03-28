@@ -29,6 +29,10 @@ def ensure_chunk_content_type_column():
             conn.execute(text("ALTER TABLE chunks ADD COLUMN content_type VARCHAR NOT NULL DEFAULT 'speech'"))
             conn.commit()
             print("Migration: Added chunks.content_type column")
+        if "should_process" not in column_names:
+            conn.execute(text("ALTER TABLE chunks ADD COLUMN should_process BOOLEAN NOT NULL DEFAULT 1"))
+            conn.commit()
+            print("Migration: Added chunks.should_process column")
 
 @app.on_event("startup")
 def startup_event():
@@ -106,18 +110,18 @@ def upload_audio(
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # 3. Create Recording entry (Status: processing)
+    # 3. Create Recording entry (Status: splitting)
     recording = models.Recording(
         file_path=file_path,
         profile_id=new_profile.id,
-        status="processing"
+        status="splitting"
     )
     db.add(recording)
     db.commit()
     db.refresh(recording)
 
-    # 4. Offload processing to background
-    background_tasks.add_task(process_recording_background, recording.id)
+    # 4. Offload chunk split (only) to background
+    background_tasks.add_task(split_recording_background, recording.id)
 
     return recording
 
@@ -149,6 +153,9 @@ def update_chunk(chunk_id: int, chunk_update: schemas.ChunkUpdate, db: Session =
     
     if chunk_update.is_bookmarked is not None:
         chunk.is_bookmarked = chunk_update.is_bookmarked
+
+    if chunk_update.should_process is not None:
+        chunk.should_process = chunk_update.should_process
 
     db.commit()
     db.refresh(chunk)
@@ -189,12 +196,12 @@ def delete_profile(profile_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Profile and associated files deleted successfully"}
 
-def process_recording_background(recording_id: int):
+def split_recording_background(recording_id: int):
     """
     Background task to process audio without blocking the main thread.
     Creates its own DB session.
     """
-    print(f"Starting background processing for recording {recording_id}", flush=True)
+    print(f"Starting background splitting for recording {recording_id}", flush=True)
     db = SessionLocal()
     try:
         recording = db.query(models.Recording).filter(models.Recording.id == recording_id).first()
@@ -209,8 +216,8 @@ def process_recording_background(recording_id: int):
              db.commit()
              return
 
-        # Process
-        chunks_data = audio_processor.process(recording.file_path)
+        # Split only (no transcription yet)
+        chunks_data = audio_processor.split_audio_only(recording.file_path)
 
         # Clear old chunks
         db.query(models.Chunk).filter(models.Chunk.recording_id == recording.id).delete()
@@ -225,16 +232,17 @@ def process_recording_background(recording_id: int):
                 end_time=chunk_data.get("end_time", 0.0),
                 user_note=chunk_data.get("user_note", None),
                 file_path=chunk_data.get("file_path", None),
-                content_type=chunk_data.get("content_type", "speech")
+                content_type=chunk_data.get("content_type", "speech"),
+                should_process=chunk_data.get("should_process", True),
             )
             db.add(chunk)
 
-        recording.status = "completed"
+        recording.status = "awaiting_selection"
         db.commit()
-        print(f"Background processing completed for recording {recording_id}", flush=True)
+        print(f"Background splitting completed for recording {recording_id}", flush=True)
 
     except Exception as e:
-        print(f"Error in background processing: {e}", flush=True)
+        print(f"Error in background splitting: {e}", flush=True)
         try:
             recording.status = "failed"
             db.commit()
@@ -276,13 +284,74 @@ def retry_processing(
              raise HTTPException(status_code=400, detail="Processing already completed.")
 
     # Reset status
+    recording.status = "splitting"
+    db.commit()
+    db.refresh(recording)
+
+    # Offload split-only background task
+    background_tasks.add_task(split_recording_background, recording.id)
+
+    return recording
+
+
+def process_selected_chunks_background(recording_id: int):
+    print(f"Starting selected-chunk processing for recording {recording_id}", flush=True)
+    db = SessionLocal()
+    try:
+        recording = db.query(models.Recording).filter(models.Recording.id == recording_id).first()
+        if not recording:
+            print(f"Recording {recording_id} not found in selected processing task.", flush=True)
+            return
+
+        selected_chunks = (
+            db.query(models.Chunk)
+            .filter(models.Chunk.recording_id == recording_id, models.Chunk.should_process == True)  # noqa: E712
+            .order_by(models.Chunk.start_time.asc())
+            .all()
+        )
+
+        if not selected_chunks:
+            recording.status = "completed"
+            db.commit()
+            print(f"No selected chunks for recording {recording_id}. Marked as completed.", flush=True)
+            return
+
+        for idx, chunk in enumerate(selected_chunks):
+            if not chunk.file_path or not os.path.exists(chunk.file_path):
+                continue
+            result = audio_processor.process_single_chunk(chunk.file_path, idx)
+            chunk.title = result.get("title", chunk.title)
+            chunk.transcript = result.get("transcript", chunk.transcript)
+            chunk.content_type = result.get("content_type", chunk.content_type)
+
+        recording.status = "completed"
+        db.commit()
+        print(f"Selected-chunk processing completed for recording {recording_id}", flush=True)
+    except Exception as e:
+        print(f"Error in selected-chunk processing: {e}", flush=True)
+        try:
+            recording.status = "failed"
+            db.commit()
+        except:
+            pass
+    finally:
+        db.close()
+
+
+@app.post("/recordings/{recording_id}/process-selected", response_model=schemas.Recording)
+def process_selected_chunks(recording_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    if not audio_processor:
+        raise HTTPException(status_code=500, detail="Audio Processor not initialized.")
+
+    recording = db.query(models.Recording).filter(models.Recording.id == recording_id).first()
+    if not recording:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
     recording.status = "processing"
     db.commit()
     db.refresh(recording)
 
-    # Offload to background task
-    background_tasks.add_task(process_recording_background, recording.id)
-
+    background_tasks.add_task(process_selected_chunks_background, recording.id)
     return recording
 
 # Mount static files to serve audio

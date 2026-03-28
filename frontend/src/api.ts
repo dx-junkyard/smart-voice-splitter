@@ -17,13 +17,14 @@ export interface Chunk {
   file_path: string | null;
   is_bookmarked: boolean;
   content_type: "speech" | "singing";
+  should_process: boolean;
 }
 
 export interface Recording {
   id: number;
   profile_id: number;
   file_path: string;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+  status: 'pending' | 'splitting' | 'awaiting_selection' | 'processing' | 'completed' | 'failed';
   created_at: string;
   chunks: Chunk[];
 }
@@ -47,7 +48,7 @@ export const getProfile = async (id: number) => {
   return response.data;
 };
 
-export const updateChunk = async (chunkId: number, updates: { user_note?: string; is_bookmarked?: boolean }) => {
+export const updateChunk = async (chunkId: number, updates: { user_note?: string; is_bookmarked?: boolean; should_process?: boolean }) => {
   const response = await api.patch<Chunk>(`/chunks/${chunkId}`, updates);
   return response.data;
 };
@@ -68,5 +69,10 @@ export const deleteProfile = async (id: number) => {
 
 export const retryProcessing = async (profileId: number) => {
   const response = await api.post<Recording>(`/profiles/${profileId}/retry`);
+  return response.data;
+};
+
+export const processSelectedChunks = async (recordingId: number) => {
+  const response = await api.post<Recording>(`/recordings/${recordingId}/process-selected`);
   return response.data;
 };

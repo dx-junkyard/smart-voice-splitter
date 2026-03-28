@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, Text
+from sqlalchemy import Boolean, Column, Integer, String, Float, ForeignKey, DateTime, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -40,5 +40,6 @@ class Chunk(Base):
     file_path = Column(String, nullable=True)
     is_bookmarked = Column(Integer, default=False) # storing boolean as 0/1 or boolean type if supported, SQLAlchemy Boolean maps to appropriate type
     content_type = Column(String, default="speech", nullable=False)
+    should_process = Column(Boolean, default=True, nullable=False)
 
     recording = relationship("Recording", back_populates="chunks")

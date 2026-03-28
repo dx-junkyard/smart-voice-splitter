@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { getProfile, updateChunk, type Profile, type Chunk } from '../api';
+import { getProfile, processSelectedChunks, updateChunk, type Profile, type Chunk } from '../api';
 import { ArrowLeft, Clock, Play, Pause, Bookmark, ChevronDown, ChevronUp, Search, Music2, MessageSquare } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -19,7 +19,9 @@ const DetailView: React.FC = () => {
   const [savingStatus, setSavingStatus] = useState<Record<number, 'saving' | 'saved' | null>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [filterMode, setFilterMode] = useState<'all' | 'singing' | 'speech'>('all');
+  const [showOnlyProcessingTarget, setShowOnlyProcessingTarget] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  const [isStartingProcessing, setIsStartingProcessing] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const notesDebounceRefs = useRef<Record<number, NodeJS.Timeout>>({});
@@ -76,14 +78,15 @@ const DetailView: React.FC = () => {
     const q = searchQuery.trim().toLowerCase();
     return chunks.filter((chunk) => {
       const matchesType = filterMode === 'all' ? true : chunk.content_type === filterMode;
+      const matchesProcessTarget = showOnlyProcessingTarget ? chunk.should_process : true;
       const matchesText =
         q.length === 0 ||
         chunk.title.toLowerCase().includes(q) ||
         chunk.transcript.toLowerCase().includes(q) ||
         (chunk.content_type === 'singing' && ['song', 'sing', '唄', '歌', '練習', 'お手本'].some((k) => q.includes(k)));
-      return matchesType && matchesText;
+      return matchesType && matchesText && matchesProcessTarget;
     });
-  }, [chunks, filterMode, searchQuery]);
+  }, [chunks, filterMode, searchQuery, showOnlyProcessingTarget]);
 
   const togglePlayback = (e: React.MouseEvent, chunk: Chunk) => {
     e.stopPropagation();
@@ -122,6 +125,39 @@ const DetailView: React.FC = () => {
       await updateChunk(chunkId, { is_bookmarked: wasBookmarked });
     } catch (err) {
       console.error('Failed to toggle bookmark', err);
+    }
+  };
+
+  const toggleShouldProcess = async (e: React.SyntheticEvent, chunkId: number) => {
+    e.stopPropagation();
+    if (!profile) return;
+
+    const updatedRecordings = profile.recordings.map((r) => ({
+      ...r,
+      chunks: r.chunks.map((c) => (c.id === chunkId ? { ...c, should_process: !c.should_process } : c)),
+    }));
+    const nextValue = updatedRecordings[0].chunks.find((c) => c.id === chunkId)?.should_process ?? true;
+    setProfile({ ...profile, recordings: updatedRecordings });
+
+    try {
+      await updateChunk(chunkId, { should_process: nextValue });
+    } catch (err) {
+      console.error('Failed to update processing target flag', err);
+    }
+  };
+
+  const handleStartSelectedChunkProcessing = async () => {
+    if (!recording) return;
+    setIsStartingProcessing(true);
+    try {
+      await processSelectedChunks(recording.id);
+      await fetchProfile(profile.id);
+      alert('選択したチャンクの処理を開始しました。完了まで少しお待ちください。');
+    } catch (err) {
+      console.error('Failed to start selected chunk processing', err);
+      alert('処理開始に失敗しました。');
+    } finally {
+      setIsStartingProcessing(false);
     }
   };
 
@@ -196,8 +232,36 @@ const DetailView: React.FC = () => {
                 </button>
               ))}
             </div>
+            <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl border border-white/15 bg-slate-900 px-3 py-2 text-sm text-slate-200">
+              <input
+                type="checkbox"
+                checked={showOnlyProcessingTarget}
+                onChange={(e) => setShowOnlyProcessingTarget(e.target.checked)}
+              />
+              処理対象のみ表示
+            </label>
           </div>
-          <p className="text-xs text-slate-300">強い音量と伸びのある発声を優先して唄区間を自動タグ付け（🎵）しています。</p>
+          <p className="text-xs text-slate-300">各チャンクの「処理対象」チェックをON/OFFして、後続の処理対象を選べます。強い音量と伸びのある発声を優先して唄区間を自動タグ付け（🎵）しています。</p>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <span className="rounded-full bg-indigo-500/20 px-3 py-1 text-xs text-indigo-100">
+              Status: {recording?.status ?? 'unknown'}
+            </span>
+            <button
+              onClick={handleStartSelectedChunkProcessing}
+              disabled={!recording || recording.status === 'splitting' || recording.status === 'processing' || isStartingProcessing}
+              className={cn(
+                'rounded-lg px-3 py-1.5 text-sm font-semibold text-white',
+                !recording || recording.status === 'splitting' || recording.status === 'processing' || isStartingProcessing
+                  ? 'cursor-not-allowed bg-slate-600'
+                  : 'bg-indigo-500 hover:bg-indigo-400',
+              )}
+            >
+              {isStartingProcessing || recording?.status === 'processing' ? '処理中...' : '選択したチャンクを処理'}
+            </button>
+            {recording?.status === 'awaiting_selection' && (
+              <span className="text-xs text-amber-200">チャンク分割が完了しました。処理対象を選んで処理を開始してください。</span>
+            )}
+          </div>
         </section>
 
         <div className="space-y-4">
@@ -226,6 +290,18 @@ const DetailView: React.FC = () => {
                   </div>
 
                   <div className="flex items-center gap-2">
+                    <label
+                      onClick={(e) => e.stopPropagation()}
+                      className={cn(
+                        'inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs',
+                        chunk.should_process
+                          ? 'border-emerald-300/50 bg-emerald-500/20 text-emerald-200'
+                          : 'border-slate-400/30 bg-slate-700/40 text-slate-300',
+                      )}
+                    >
+                      <input type="checkbox" checked={chunk.should_process} onChange={(e) => toggleShouldProcess(e, chunk.id)} />
+                      処理対象
+                    </label>
                     <button
                       onClick={(e) => toggleBookmark(e, chunk.id)}
                       className={cn('rounded-full p-2', chunk.is_bookmarked ? 'text-yellow-400 hover:bg-yellow-400/10' : 'text-slate-400 hover:bg-white/10')}
