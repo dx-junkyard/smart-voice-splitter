@@ -39,5 +39,6 @@ class Chunk(Base):
     user_note = Column(Text, nullable=True)
     file_path = Column(String, nullable=True)
     is_bookmarked = Column(Integer, default=False) # storing boolean as 0/1 or boolean type if supported, SQLAlchemy Boolean maps to appropriate type
+    content_type = Column(String, default="speech", nullable=False)
 
     recording = relationship("Recording", back_populates="chunks")

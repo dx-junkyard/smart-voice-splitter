@@ -5,7 +5,7 @@ import tempfile
 import time
 import subprocess
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import psutil
 from datetime import datetime
 
@@ -228,7 +228,7 @@ class AudioProcessor:
                 self._log(f"[Progress] Step: Structuring chunk {i+1}/{total_chunks} with LLM...")
                 # Immediately process segments into logical chunks with titles
                 # Note: split_and_title returns chunks with start_time/end_time relative to the chunk audio (0.0 based)
-                local_chunks = self.split_and_title(segments)
+                local_chunks = self.split_and_title(segments, audio_file_path=chunk_filename)
                 
                 # Adjust timestamps to be absolute relative to the original file
                 # Adjust timestamps to be absolute relative to the original file
@@ -291,7 +291,59 @@ class AudioProcessor:
             
         return final_chunks
 
-    def split_and_title(self, segments: List[Any]) -> List[Dict[str, Any]]:
+    def _extract_audio_features(self, file_path: str) -> Dict[str, float]:
+        """
+        Extract simple loudness-related features via ffmpeg volumedetect.
+        """
+        cmd = [
+            "ffmpeg",
+            "-v", "error",
+            "-i", file_path,
+            "-af", "volumedetect",
+            "-f", "null",
+            "-"
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        output = result.stderr
+
+        def _extract(pattern: str, default: float) -> float:
+            match = re.search(pattern, output)
+            if not match:
+                return default
+            try:
+                return float(match.group(1))
+            except Exception:
+                return default
+
+        return {
+            "mean_volume": _extract(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", -100.0),
+            "max_volume": _extract(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", -100.0),
+        }
+
+    def _classify_chunk_content(self, transcript: str, start_time: float, end_time: float, audio_features: Optional[Dict[str, float]] = None) -> Tuple[str, List[str]]:
+        """
+        Classify chunk as song-related or speech using loudness + sustained-expression heuristics.
+        """
+        features = audio_features or {}
+        duration = max(0.0, end_time - start_time)
+        mean_volume = features.get("mean_volume", -100.0)
+        max_volume = features.get("max_volume", -100.0)
+
+        sustained_pattern = r"([あいうえおアイウエオー〜]{2,}|[a-zA-Z]{3,}|っ+|ッ+)"
+        sustained_hits = re.findall(sustained_pattern, transcript)
+
+        reasons = []
+        if max_volume >= -7.0:
+            reasons.append("high_peak")
+        if mean_volume >= -20.0:
+            reasons.append("high_mean")
+        if duration >= 8.0 and len(sustained_hits) >= 2:
+            reasons.append("sustained_voice")
+
+        is_song = len(reasons) >= 2
+        return ("singing" if is_song else "speech", reasons)
+
+    def split_and_title(self, segments: List[Any], audio_file_path: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Uses GPT-4o-mini to split transcript segments into logical chunks with titles.
         """
@@ -353,7 +405,21 @@ class AudioProcessor:
                     valid_chunks.append(c)
                 else:
                     self._log(f"Skipping invalid chunk format: {c}")
-            
+
+            # Optional classification for searchability (singing vs speech)
+            audio_features = self._extract_audio_features(audio_file_path) if audio_file_path else None
+            for c in valid_chunks:
+                content_type, reasons = self._classify_chunk_content(
+                    transcript=c.get("transcript", ""),
+                    start_time=float(c.get("start_time", 0.0)),
+                    end_time=float(c.get("end_time", 0.0)),
+                    audio_features=audio_features,
+                )
+                c["content_type"] = content_type
+                if content_type == "singing" and not str(c.get("title", "")).startswith("🎵"):
+                    c["title"] = f"🎵 {c.get('title', 'Singing Segment')}"
+                c["classification_reasons"] = reasons
+
             return valid_chunks
 
         except json.JSONDecodeError:
@@ -377,7 +443,7 @@ class AudioProcessor:
             segments = self.transcribe(file_path)
             self._log(f"[Progress] Step: Structuring small file with LLM...")
             # Note: For small files, segments are relative to 0.0 of the file.
-            chunks = self.split_and_title(segments)
+            chunks = self.split_and_title(segments, audio_file_path=file_path)
 
             # For small files, we now need to physically cut the file based on the LLM chunks
             # Create a persistent directory for chunks

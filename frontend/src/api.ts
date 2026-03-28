@@ -16,6 +16,7 @@ export interface Chunk {
   user_note: string | null;
   file_path: string | null;
   is_bookmarked: boolean;
+  content_type: "speech" | "singing";
 }
 
 export interface Recording {
