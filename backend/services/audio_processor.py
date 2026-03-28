@@ -488,6 +488,17 @@ class AudioProcessor:
         """
         Split audio into physical chunks only (no transcription/LLM).
         """
+        def _normalize_preview_text(segments: List[Any]) -> str:
+            texts: List[str] = []
+            for s in segments:
+                if isinstance(s, dict):
+                    text = str(s.get("text", "")).strip()
+                else:
+                    text = str(getattr(s, "text", "")).strip()
+                if text:
+                    texts.append(text)
+            return " ".join(texts).strip()
+
         base_name = os.path.splitext(os.path.basename(file_path))[0]
         chunk_dir = os.path.join(self.CHUNKS_DIR, base_name)
         os.makedirs(chunk_dir, exist_ok=True)
@@ -522,15 +533,56 @@ class AudioProcessor:
             ]
             subprocess.run(cmd, check=True)
 
+            preview_file = os.path.join(chunk_dir, f"chunk_{i}_preview.mp3")
+            preview_duration = min(5.0, max(0.0, end - start))
+            preview_transcript = ""
+            if preview_duration >= 0.1:
+                preview_cmd = [
+                    "ffmpeg",
+                    "-v", "error",
+                    "-i", chunk_filename,
+                    "-ss", "0",
+                    "-t", str(preview_duration),
+                    "-c:a", "libmp3lame",
+                    "-q:a", "6",
+                    "-ac", "1",
+                    "-y",
+                    preview_file,
+                ]
+                try:
+                    subprocess.run(preview_cmd, check=True)
+                    preview_segments = self.transcribe_with_retry(preview_file)
+                    preview_transcript = _normalize_preview_text(preview_segments)
+                except Exception as e:
+                    self._log(f"Failed to build preview transcript for chunk {i + 1}: {e}")
+                finally:
+                    if os.path.exists(preview_file):
+                        os.remove(preview_file)
+
+            audio_features = self._extract_audio_features(chunk_filename)
+            chunk_duration = max(0.0, end - start)
+            max_volume = audio_features.get("max_volume", -100.0)
+            is_singing = max_volume >= -10.0 and chunk_duration >= 5.0
+            content_type = "singing" if is_singing else "speech"
+            should_process = True if is_singing else False
+
+            preview_head = preview_transcript[:15]
+            if preview_head:
+                title = f"Chunk {i + 1}: {preview_head}{'...' if len(preview_transcript) > 15 else ''}"
+            else:
+                title = f"Chunk {i + 1}"
+            if is_singing:
+                title = f"🎵 {title}"
+
             chunks.append(
                 {
-                    "title": f"Chunk {i + 1}",
-                    "transcript": "",
+                    "title": title,
+                    "transcript": preview_transcript,
                     "start_time": start,
                     "end_time": end,
                     "file_path": chunk_filename,
-                    "content_type": "speech",
-                    "should_process": True,
+                    "content_type": content_type,
+                    "should_process": should_process,
                 }
             )
 
