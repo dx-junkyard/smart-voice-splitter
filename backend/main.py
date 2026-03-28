@@ -2,6 +2,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 import shutil
 import os
 import uuid
@@ -18,12 +19,24 @@ from database import SessionLocal
 
 app = FastAPI()
 
+
+def ensure_chunk_content_type_column():
+    """Backward-compatible lightweight migration for SQLite environments."""
+    with engine.connect() as conn:
+        columns = conn.execute(text("PRAGMA table_info(chunks)"))
+        column_names = {row[1] for row in columns}
+        if "content_type" not in column_names:
+            conn.execute(text("ALTER TABLE chunks ADD COLUMN content_type VARCHAR NOT NULL DEFAULT 'speech'"))
+            conn.commit()
+            print("Migration: Added chunks.content_type column")
+
 @app.on_event("startup")
 def startup_event():
     """
     On startup, check for recordings that are stuck in 'processing' state
     (e.g. from a previous crash) and mark them as 'failed' so they can be resumed.
     """
+    ensure_chunk_content_type_column()
     print("Startup: Checking for stale processing records...")
     db = SessionLocal()
     try:
@@ -211,7 +224,8 @@ def process_recording_background(recording_id: int):
                 start_time=chunk_data.get("start_time", 0.0),
                 end_time=chunk_data.get("end_time", 0.0),
                 user_note=chunk_data.get("user_note", None),
-                file_path=chunk_data.get("file_path", None)
+                file_path=chunk_data.get("file_path", None),
+                content_type=chunk_data.get("content_type", "speech")
             )
             db.add(chunk)
 

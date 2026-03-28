@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { getProfiles, type Profile, uploadFile, deleteProfile, retryProcessing } from '../api';
-import { Calendar, FileText, Upload, X, Trash2, RefreshCw, AlertCircle } from 'lucide-react';
+import { Calendar, FileText, Upload, X, Trash2, RefreshCw, AlertCircle, Music2, Mic2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -22,13 +22,26 @@ const Dashboard: React.FC = () => {
   const fetchProfiles = async () => {
     try {
       const data = await getProfiles();
-      // Sort by recorded_at desc
       data.sort((a, b) => new Date(b.recorded_at).getTime() - new Date(a.recorded_at).getTime());
       setProfiles(data);
     } catch (error) {
       console.error('Failed to fetch profiles', error);
     }
-  }
+  };
+
+  const totalChunks = useMemo(
+    () => profiles.reduce((acc, p) => acc + (p.recordings[0]?.chunks.length || 0), 0),
+    [profiles],
+  );
+
+  const singingChunks = useMemo(
+    () =>
+      profiles.reduce(
+        (acc, p) => acc + (p.recordings[0]?.chunks.filter((c) => c.content_type === 'singing').length || 0),
+        0,
+      ),
+    [profiles],
+  );
 
   const handleDeleteProfile = async () => {
     if (!profileToDelete) return;
@@ -46,17 +59,16 @@ const Dashboard: React.FC = () => {
     e.preventDefault();
     e.stopPropagation();
 
-    setRetryingIds(prev => new Set(prev).add(profileId));
+    setRetryingIds((prev) => new Set(prev).add(profileId));
     try {
       await retryProcessing(profileId);
-      // Refresh list to update status/chunks
       fetchProfiles();
-      alert("Processing restarted. Please wait.");
+      alert('Processing restarted. Please wait.');
     } catch (error) {
-      console.error("Retry failed", error);
-      alert("Retry failed. Check console.");
+      console.error('Retry failed', error);
+      alert('Retry failed. Check console.');
     } finally {
-      setRetryingIds(prev => {
+      setRetryingIds((prev) => {
         const next = new Set(prev);
         next.delete(profileId);
         return next;
@@ -64,116 +76,103 @@ const Dashboard: React.FC = () => {
     }
   };
 
-
   return (
-    <div className="container mx-auto p-6">
-      <div className="flex justify-between items-center mb-8">
-        <h1 className="text-3xl font-bold text-gray-800">Smart Voice Splitter</h1>
-        <div className="flex gap-4">
-          <button
-            onClick={fetchProfiles}
-            className="flex items-center gap-2 text-gray-600 hover:text-gray-900 transition"
-            title="Refresh List"
-          >
-            <RefreshCw size={20} />
-          </button>
-          <button
-            onClick={() => setShowUploadModal(true)}
-            className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition"
-          >
-            <Upload size={20} />
-            New Upload
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {profiles.map((profile) => (
-          <Link
-            to={`/profiles/${profile.id}`}
-            key={profile.id}
-            className="block bg-white rounded-xl shadow-md hover:shadow-lg transition p-6 border border-gray-100 relative group"
-          >
-            <button
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                setProfileToDelete(profile);
-              }}
-              className="absolute top-4 right-4 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition p-2 hover:bg-red-50 rounded-full"
-              title="Delete Profile"
-            >
-              <Trash2 size={20} />
-            </button>
-            <h2 className="text-xl font-semibold mb-2 text-gray-800">{profile.title}</h2>
-            <div className="flex items-center text-gray-500 text-sm mb-4">
-              <Calendar size={16} className="mr-2" />
-              {new Date(profile.recorded_at).toLocaleString()}
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="mx-auto max-w-6xl px-6 py-10">
+        <div className="mb-8 rounded-3xl border border-white/10 bg-gradient-to-br from-indigo-600/30 via-violet-500/20 to-fuchsia-500/20 p-8 shadow-2xl backdrop-blur">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <p className="mb-2 text-sm font-medium text-indigo-200">Audio analysis workspace</p>
+              <h1 className="text-4xl font-bold tracking-tight">Smart Voice Splitter</h1>
+              <p className="mt-3 text-slate-300">講義音声と唄セクションを自動整理し、復習しやすく表示します。</p>
             </div>
-            {profile.summary && (
-              <p className="text-gray-600 line-clamp-3 text-sm">{profile.summary}</p>
-            )}
+            <div className="flex gap-3">
+              <button onClick={fetchProfiles} className="rounded-xl border border-white/15 bg-white/5 p-3 hover:bg-white/10" title="Refresh List">
+                <RefreshCw size={20} />
+              </button>
+              <button
+                onClick={() => setShowUploadModal(true)}
+                className="flex items-center gap-2 rounded-xl bg-indigo-500 px-5 py-3 font-semibold text-white hover:bg-indigo-400"
+              >
+                <Upload size={18} />
+                New Upload
+              </button>
+            </div>
+          </div>
 
-            {/* Status / Resume Logic */}
-            {(() => {
-              const recording = profile.recordings[0];
-              const hasRecording = !!recording;
-              const status = recording?.status || 'pending';
-              // Previous data might have no status but have chunks (completed) or 0 chunks (failed/pending)
-              // If status is present, use it. If not, infer.
-              const inferredStatus = status === 'pending' && (!recording || recording.chunks.length === 0)
-                ? 'failed' // assume failed if no chunks and no explicit status/pending
-                : status;
+          <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <StatCard icon={<FileText size={18} />} label="Profiles" value={profiles.length} />
+            <StatCard icon={<Mic2 size={18} />} label="All Chunks" value={totalChunks} />
+            <StatCard icon={<Music2 size={18} />} label="Singing Chunks" value={singingChunks} />
+          </div>
+        </div>
 
-              // If we have status, trust it. "pending" usually means default, "processing", "completed", "failed".
-              // If old data (no status column in DB yet migrated to default='completed'), check chunks.
-              const isProcessing = status === 'processing' || retryingIds.has(profile.id);
-              // condition to show retry: status failed OR (status completed but 0 chunks??)
+        <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
+          {profiles.map((profile) => {
+            const recording = profile.recordings[0];
+            const status = recording?.status || 'pending';
+            const isProcessing = status === 'processing' || retryingIds.has(profile.id);
+            const showRetry = recording && !isProcessing && (status === 'failed' || (status === 'completed' && recording.chunks.length === 0));
+            const songCount = recording?.chunks.filter((c) => c.content_type === 'singing').length || 0;
 
-              // Simplified: Show retry if we have a recording but no chunks (and not processing), or explicit failed status
-              const showRetry = hasRecording && !isProcessing && (status === 'failed' || (status === 'completed' && recording.chunks.length === 0));
+            return (
+              <Link
+                to={`/profiles/${profile.id}`}
+                key={profile.id}
+                className="group relative rounded-2xl border border-white/10 bg-white/5 p-6 shadow-lg transition hover:-translate-y-0.5 hover:border-indigo-300/40 hover:bg-white/10"
+              >
+                <button
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setProfileToDelete(profile);
+                  }}
+                  className="absolute right-4 top-4 rounded-full p-2 text-slate-300 opacity-0 transition hover:bg-red-500/20 hover:text-red-300 group-hover:opacity-100"
+                  title="Delete Profile"
+                >
+                  <Trash2 size={18} />
+                </button>
 
-              if (isProcessing) {
-                return (
-                  <div className="mt-4 flex items-center text-orange-600 text-sm font-medium animate-pulse">
+                <h2 className="mb-2 pr-8 text-xl font-semibold text-white">{profile.title}</h2>
+                <div className="mb-4 flex items-center text-sm text-slate-300">
+                  <Calendar size={15} className="mr-2" />
+                  {new Date(profile.recorded_at).toLocaleString()}
+                </div>
+
+                {profile.summary && <p className="mb-4 line-clamp-3 text-sm text-slate-200/80">{profile.summary}</p>}
+
+                <div className="mb-4 flex items-center gap-2 text-xs text-indigo-100">
+                  <span className="rounded-full bg-indigo-500/30 px-2 py-1">Chunk: {recording?.chunks.length || 0}</span>
+                  <span className="rounded-full bg-fuchsia-500/30 px-2 py-1">🎵 {songCount}</span>
+                </div>
+
+                {isProcessing ? (
+                  <div className="mt-4 flex items-center text-sm font-medium text-amber-300">
                     <RefreshCw size={16} className="mr-1 animate-spin" />
                     Processing...
                   </div>
-                );
-              }
-
-              if (showRetry) {
-                return (
+                ) : showRetry ? (
                   <div className="mt-4 flex items-center gap-4">
-                    <div className="flex items-center text-red-600 text-sm font-medium">
+                    <div className="flex items-center text-sm font-medium text-rose-300">
                       <AlertCircle size={16} className="mr-1" />
                       Processing Failed
                     </div>
-                    <button
-                      onClick={(e) => handleRetry(e, profile.id)}
-                      className="flex items-center text-blue-600 text-sm font-medium hover:underline"
-                    >
-                      <RefreshCw size={16} className="mr-1" />
+                    <button onClick={(e) => handleRetry(e, profile.id)} className="text-sm font-medium text-indigo-300 hover:underline">
                       Resume
                     </button>
                   </div>
-                );
-              }
+                ) : (
+                  <div className="mt-4 flex items-center text-sm font-semibold text-indigo-200">
+                    <FileText size={16} className="mr-1" />
+                    View Details
+                  </div>
+                )}
+              </Link>
+            );
+          })}
+        </div>
 
-              return (
-                <div className="mt-4 flex items-center text-blue-600 text-sm font-medium">
-                  <FileText size={16} className="mr-1" />
-                  View Details
-                </div>
-              );
-            })()}
-          </Link>
-        ))}
-        {profiles.length === 0 && (
-          <div className="col-span-full text-center py-12 text-gray-500">
-            No recordings found. Start by uploading a new file.
-          </div>
-        )}
+        {profiles.length === 0 && <div className="py-12 text-center text-slate-300">No recordings found. Start by uploading a new file.</div>}
       </div>
 
       {showUploadModal && (
@@ -186,16 +185,17 @@ const Dashboard: React.FC = () => {
         />
       )}
 
-      {profileToDelete && (
-        <DeleteModal
-          profile={profileToDelete}
-          onClose={() => setProfileToDelete(null)}
-          onConfirm={handleDeleteProfile}
-        />
-      )}
+      {profileToDelete && <DeleteModal profile={profileToDelete} onClose={() => setProfileToDelete(null)} onConfirm={handleDeleteProfile} />}
     </div>
   );
 };
+
+const StatCard: React.FC<{ icon: React.ReactNode; label: string; value: number }> = ({ icon, label, value }) => (
+  <div className="rounded-xl border border-white/15 bg-white/5 p-4">
+    <div className="mb-2 flex items-center gap-2 text-indigo-200">{icon}<span className="text-sm">{label}</span></div>
+    <p className="text-2xl font-bold text-white">{value}</p>
+  </div>
+);
 
 interface UploadModalProps {
   onClose: () => void;
@@ -213,7 +213,7 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess }) => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file || !title || !recordedAt) {
-      setError("Please fill in all required fields.");
+      setError('Please fill in all required fields.');
       return;
     }
 
@@ -229,73 +229,26 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess }) => {
       await uploadFile(formData);
       onSuccess();
     } catch (err) {
-      console.error("Upload failed", err);
-      setError("Upload failed. Please try again.");
+      console.error('Upload failed', err);
+      setError('Upload failed. Please try again.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg p-8 w-full max-w-lg relative">
-        <button onClick={onClose} className="absolute top-4 right-4 text-gray-500 hover:text-gray-700">
-          <X size={24} />
-        </button>
-        <h2 className="text-2xl font-bold mb-6">Upload New Recording</h2>
-
-        {error && <div className="bg-red-100 text-red-700 p-3 rounded mb-4">{error}</div>}
-
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
+      <div className="relative w-full max-w-lg rounded-2xl border border-white/20 bg-slate-900 p-8 text-slate-100 shadow-2xl">
+        <button onClick={onClose} className="absolute right-4 top-4 text-slate-300 hover:text-white"><X size={24} /></button>
+        <h2 className="mb-6 text-2xl font-bold">Upload New Recording</h2>
+        {error && <div className="mb-4 rounded-lg bg-red-500/20 p-3 text-red-100">{error}</div>}
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Title *</label>
-            <input
-              type="text"
-              required
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Recorded At *</label>
-            <input
-              type="datetime-local"
-              required
-              value={recordedAt}
-              onChange={(e) => setRecordedAt(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Summary</label>
-            <textarea
-              value={summary}
-              onChange={(e) => setSummary(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg p-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-              rows={3}
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Audio File *</label>
-            <input
-              type="file"
-              required
-              accept="audio/*"
-              onChange={(e) => setFile(e.target.files ? e.target.files[0] : null)}
-              className="w-full border border-gray-300 rounded-lg p-2"
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={loading}
-            className={cn(
-              "w-full text-white py-2 rounded-lg font-semibold transition",
-              loading ? "bg-gray-400 cursor-not-allowed" : "bg-blue-600 hover:bg-blue-700"
-            )}
-          >
-            {loading ? "AI is processing audio..." : "Upload & Process"}
+          <Field label="Title *"><input type="text" required value={title} onChange={(e) => setTitle(e.target.value)} className="w-full rounded-lg border border-white/15 bg-slate-800 p-2" /></Field>
+          <Field label="Recorded At *"><input type="datetime-local" required value={recordedAt} onChange={(e) => setRecordedAt(e.target.value)} className="w-full rounded-lg border border-white/15 bg-slate-800 p-2" /></Field>
+          <Field label="Summary"><textarea value={summary} onChange={(e) => setSummary(e.target.value)} className="w-full rounded-lg border border-white/15 bg-slate-800 p-2" rows={3} /></Field>
+          <Field label="Audio File *"><input type="file" required accept="audio/*" onChange={(e) => setFile(e.target.files ? e.target.files[0] : null)} className="w-full rounded-lg border border-white/15 bg-slate-800 p-2" /></Field>
+          <button type="submit" disabled={loading} className={cn('w-full rounded-lg py-2 font-semibold text-white', loading ? 'bg-slate-500' : 'bg-indigo-500 hover:bg-indigo-400')}>
+            {loading ? 'AI is processing audio...' : 'Upload & Process'}
           </button>
         </form>
       </div>
@@ -303,6 +256,12 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onSuccess }) => {
   );
 };
 
+const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <div>
+    <label className="mb-1 block text-sm text-slate-200">{label}</label>
+    {children}
+  </div>
+);
 
 interface DeleteModalProps {
   profile: Profile;
@@ -313,7 +272,6 @@ interface DeleteModalProps {
 const DeleteModal: React.FC<DeleteModalProps> = ({ profile, onClose, onConfirm }) => {
   const [titleConfirm, setTitleConfirm] = useState('');
   const [loading, setLoading] = useState(false);
-
   const isMatch = titleConfirm === profile.title;
 
   const handleConfirm = async () => {
@@ -324,44 +282,17 @@ const DeleteModal: React.FC<DeleteModalProps> = ({ profile, onClose, onConfirm }
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg p-8 w-full max-w-md relative">
-        <button onClick={onClose} className="absolute top-4 right-4 text-gray-500 hover:text-gray-700">
-          <X size={24} />
-        </button>
-        <h2 className="text-xl font-bold mb-4 text-red-600">Delete Profile</h2>
-        <p className="text-gray-600 mb-4">
-          Are you sure you want to delete <strong>{profile.title}</strong>? This action cannot be undone.
-        </p>
-        <p className="text-sm text-gray-500 mb-2">
-          Please type <strong>{profile.title}</strong> to confirm.
-        </p>
-        <input
-          type="text"
-          value={titleConfirm}
-          onChange={(e) => setTitleConfirm(e.target.value)}
-          className="w-full border border-gray-300 rounded-lg p-2 mb-6 focus:ring-2 focus:ring-red-500 focus:outline-none"
-          placeholder="Type profile title here"
-        />
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
+      <div className="relative w-full max-w-md rounded-2xl border border-white/20 bg-slate-900 p-8 text-slate-100 shadow-2xl">
+        <button onClick={onClose} className="absolute right-4 top-4 text-slate-300 hover:text-white"><X size={24} /></button>
+        <h2 className="mb-4 text-xl font-bold text-red-300">Delete Profile</h2>
+        <p className="mb-4 text-slate-200">Are you sure you want to delete <strong>{profile.title}</strong>? This action cannot be undone.</p>
+        <p className="mb-2 text-sm text-slate-300">Please type <strong>{profile.title}</strong> to confirm.</p>
+        <input type="text" value={titleConfirm} onChange={(e) => setTitleConfirm(e.target.value)} className="mb-6 w-full rounded-lg border border-white/15 bg-slate-800 p-2" />
         <div className="flex justify-end gap-3">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg transition"
-            disabled={loading}
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleConfirm}
-            disabled={!isMatch || loading}
-            className={cn(
-              "px-4 py-2 text-white rounded-lg transition font-medium",
-              !isMatch || loading
-                ? "bg-gray-300 cursor-not-allowed"
-                : "bg-red-600 hover:bg-red-700"
-            )}
-          >
-            {loading ? "Deleting..." : "Delete Profile"}
+          <button onClick={onClose} className="rounded-lg px-4 py-2 text-slate-200 hover:bg-white/10" disabled={loading}>Cancel</button>
+          <button onClick={handleConfirm} disabled={!isMatch || loading} className={cn('rounded-lg px-4 py-2 font-medium text-white', !isMatch || loading ? 'bg-slate-600' : 'bg-red-600 hover:bg-red-500')}>
+            {loading ? 'Deleting...' : 'Delete Profile'}
           </button>
         </div>
       </div>

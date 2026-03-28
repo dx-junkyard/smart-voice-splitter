@@ -10,6 +10,7 @@ class ChunkBase(BaseModel):
     end_time: float
     file_path: Optional[str] = None
     user_note: Optional[str] = None
+    content_type: str = "speech"
 
 class ChunkCreate(ChunkBase):
     pass
@@ -19,6 +20,7 @@ class Chunk(ChunkBase):
     recording_id: int
     file_path: Optional[str]
     is_bookmarked: bool
+    content_type: str
 
     class Config:
         from_attributes = True
@@ -59,4 +61,5 @@ class Profile(ProfileBase):
 
 class ChunkUpdate(BaseModel):
     user_note: Optional[str] = None
+    content_type: str = "speech"
     is_bookmarked: Optional[bool] = None
