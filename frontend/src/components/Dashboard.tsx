@@ -30,14 +30,15 @@ const Dashboard: React.FC = () => {
   };
 
   const totalChunks = useMemo(
-    () => profiles.reduce((acc, p) => acc + (p.recordings[0]?.chunks.length || 0), 0),
+    () => profiles.reduce((acc, p) => acc + (p.recordings[0]?.chunks.filter((c) => c.should_process).length || 0), 0),
     [profiles],
   );
 
   const singingChunks = useMemo(
     () =>
       profiles.reduce(
-        (acc, p) => acc + (p.recordings[0]?.chunks.filter((c) => c.content_type === 'singing').length || 0),
+        (acc, p) =>
+          acc + (p.recordings[0]?.chunks.filter((c) => c.content_type === 'singing' && c.should_process).length || 0),
         0,
       ),
     [profiles],
@@ -113,7 +114,7 @@ const Dashboard: React.FC = () => {
             const status = recording?.status || 'pending';
             const isProcessing = status === 'processing' || retryingIds.has(profile.id);
             const showRetry = recording && !isProcessing && (status === 'failed' || (status === 'completed' && recording.chunks.length === 0));
-            const songCount = recording?.chunks.filter((c) => c.content_type === 'singing').length || 0;
+            const songCount = recording?.chunks.filter((c) => c.content_type === 'singing' && c.should_process).length || 0;
 
             return (
               <Link
@@ -142,7 +143,7 @@ const Dashboard: React.FC = () => {
                 {profile.summary && <p className="mb-4 line-clamp-3 text-sm text-slate-200/80">{profile.summary}</p>}
 
                 <div className="mb-4 flex items-center gap-2 text-xs text-indigo-100">
-                  <span className="rounded-full bg-indigo-500/30 px-2 py-1">Chunk: {recording?.chunks.length || 0}</span>
+                  <span className="rounded-full bg-indigo-500/30 px-2 py-1">Chunk: {recording?.chunks.filter((c) => c.should_process).length || 0}</span>
                   <span className="rounded-full bg-fuchsia-500/30 px-2 py-1">🎵 {songCount}</span>
                 </div>
 

@@ -11,6 +11,7 @@ class ChunkBase(BaseModel):
     file_path: Optional[str] = None
     user_note: Optional[str] = None
     content_type: str = "speech"
+    should_process: bool = True
 
 class ChunkCreate(ChunkBase):
     pass
@@ -63,3 +64,4 @@ class ChunkUpdate(BaseModel):
     user_note: Optional[str] = None
     content_type: str = "speech"
     is_bookmarked: Optional[bool] = None
+    should_process: Optional[bool] = None

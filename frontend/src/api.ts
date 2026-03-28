@@ -17,6 +17,7 @@ export interface Chunk {
   file_path: string | null;
   is_bookmarked: boolean;
   content_type: "speech" | "singing";
+  should_process: boolean;
 }
 
 export interface Recording {
@@ -47,7 +48,7 @@ export const getProfile = async (id: number) => {
   return response.data;
 };
 
-export const updateChunk = async (chunkId: number, updates: { user_note?: string; is_bookmarked?: boolean }) => {
+export const updateChunk = async (chunkId: number, updates: { user_note?: string; is_bookmarked?: boolean; should_process?: boolean }) => {
   const response = await api.patch<Chunk>(`/chunks/${chunkId}`, updates);
   return response.data;
 };

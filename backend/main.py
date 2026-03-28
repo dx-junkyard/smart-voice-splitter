@@ -29,6 +29,10 @@ def ensure_chunk_content_type_column():
             conn.execute(text("ALTER TABLE chunks ADD COLUMN content_type VARCHAR NOT NULL DEFAULT 'speech'"))
             conn.commit()
             print("Migration: Added chunks.content_type column")
+        if "should_process" not in column_names:
+            conn.execute(text("ALTER TABLE chunks ADD COLUMN should_process BOOLEAN NOT NULL DEFAULT 1"))
+            conn.commit()
+            print("Migration: Added chunks.should_process column")
 
 @app.on_event("startup")
 def startup_event():
@@ -150,6 +154,9 @@ def update_chunk(chunk_id: int, chunk_update: schemas.ChunkUpdate, db: Session =
     if chunk_update.is_bookmarked is not None:
         chunk.is_bookmarked = chunk_update.is_bookmarked
 
+    if chunk_update.should_process is not None:
+        chunk.should_process = chunk_update.should_process
+
     db.commit()
     db.refresh(chunk)
     return chunk
@@ -225,7 +232,8 @@ def process_recording_background(recording_id: int):
                 end_time=chunk_data.get("end_time", 0.0),
                 user_note=chunk_data.get("user_note", None),
                 file_path=chunk_data.get("file_path", None),
-                content_type=chunk_data.get("content_type", "speech")
+                content_type=chunk_data.get("content_type", "speech"),
+                should_process=chunk_data.get("should_process", True),
             )
             db.add(chunk)
 
