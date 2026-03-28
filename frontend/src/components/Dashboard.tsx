@@ -112,7 +112,8 @@ const Dashboard: React.FC = () => {
           {profiles.map((profile) => {
             const recording = profile.recordings[0];
             const status = recording?.status || 'pending';
-            const isProcessing = status === 'processing' || retryingIds.has(profile.id);
+            const isProcessing = status === 'processing' || status === 'splitting' || retryingIds.has(profile.id);
+            const isAwaitingSelection = status === 'awaiting_selection';
             const showRetry = recording && !isProcessing && (status === 'failed' || (status === 'completed' && recording.chunks.length === 0));
             const songCount = recording?.chunks.filter((c) => c.content_type === 'singing' && c.should_process).length || 0;
 
@@ -150,7 +151,12 @@ const Dashboard: React.FC = () => {
                 {isProcessing ? (
                   <div className="mt-4 flex items-center text-sm font-medium text-amber-300">
                     <RefreshCw size={16} className="mr-1 animate-spin" />
-                    Processing...
+                    {status === 'splitting' ? 'Splitting chunks...' : 'Processing...'}
+                  </div>
+                ) : isAwaitingSelection ? (
+                  <div className="mt-4 flex items-center text-sm font-medium text-sky-300">
+                    <AlertCircle size={16} className="mr-1" />
+                    Select target chunks
                   </div>
                 ) : showRetry ? (
                   <div className="mt-4 flex items-center gap-4">

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { getProfile, updateChunk, type Profile, type Chunk } from '../api';
+import { getProfile, processSelectedChunks, updateChunk, type Profile, type Chunk } from '../api';
 import { ArrowLeft, Clock, Play, Pause, Bookmark, ChevronDown, ChevronUp, Search, Music2, MessageSquare } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -21,6 +21,7 @@ const DetailView: React.FC = () => {
   const [filterMode, setFilterMode] = useState<'all' | 'singing' | 'speech'>('all');
   const [showOnlyProcessingTarget, setShowOnlyProcessingTarget] = useState(false);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  const [isStartingProcessing, setIsStartingProcessing] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const notesDebounceRefs = useRef<Record<number, NodeJS.Timeout>>({});
@@ -145,6 +146,21 @@ const DetailView: React.FC = () => {
     }
   };
 
+  const handleStartSelectedChunkProcessing = async () => {
+    if (!recording) return;
+    setIsStartingProcessing(true);
+    try {
+      await processSelectedChunks(recording.id);
+      await fetchProfile(profile.id);
+      alert('選択したチャンクの処理を開始しました。完了まで少しお待ちください。');
+    } catch (err) {
+      console.error('Failed to start selected chunk processing', err);
+      alert('処理開始に失敗しました。');
+    } finally {
+      setIsStartingProcessing(false);
+    }
+  };
+
   const handleNoteChange = (chunkId: number, newNote: string) => {
     setNoteDrafts((prev) => ({ ...prev, [chunkId]: newNote }));
     setSavingStatus((prev) => ({ ...prev, [chunkId]: 'saving' }));
@@ -226,6 +242,26 @@ const DetailView: React.FC = () => {
             </label>
           </div>
           <p className="text-xs text-slate-300">各チャンクの「処理対象」チェックをON/OFFして、後続の処理対象を選べます。強い音量と伸びのある発声を優先して唄区間を自動タグ付け（🎵）しています。</p>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <span className="rounded-full bg-indigo-500/20 px-3 py-1 text-xs text-indigo-100">
+              Status: {recording?.status ?? 'unknown'}
+            </span>
+            <button
+              onClick={handleStartSelectedChunkProcessing}
+              disabled={!recording || recording.status === 'splitting' || recording.status === 'processing' || isStartingProcessing}
+              className={cn(
+                'rounded-lg px-3 py-1.5 text-sm font-semibold text-white',
+                !recording || recording.status === 'splitting' || recording.status === 'processing' || isStartingProcessing
+                  ? 'cursor-not-allowed bg-slate-600'
+                  : 'bg-indigo-500 hover:bg-indigo-400',
+              )}
+            >
+              {isStartingProcessing || recording?.status === 'processing' ? '処理中...' : '選択したチャンクを処理'}
+            </button>
+            {recording?.status === 'awaiting_selection' && (
+              <span className="text-xs text-amber-200">チャンク分割が完了しました。処理対象を選んで処理を開始してください。</span>
+            )}
+          </div>
         </section>
 
         <div className="space-y-4">

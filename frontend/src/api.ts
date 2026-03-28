@@ -24,7 +24,7 @@ export interface Recording {
   id: number;
   profile_id: number;
   file_path: string;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+  status: 'pending' | 'splitting' | 'awaiting_selection' | 'processing' | 'completed' | 'failed';
   created_at: string;
   chunks: Chunk[];
 }
@@ -69,5 +69,10 @@ export const deleteProfile = async (id: number) => {
 
 export const retryProcessing = async (profileId: number) => {
   const response = await api.post<Recording>(`/profiles/${profileId}/retry`);
+  return response.data;
+};
+
+export const processSelectedChunks = async (recordingId: number) => {
+  const response = await api.post<Recording>(`/recordings/${recordingId}/process-selected`);
   return response.data;
 };
