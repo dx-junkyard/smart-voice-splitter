@@ -87,6 +87,11 @@ const DetailView: React.FC = () => {
       return matchesType && matchesText && matchesProcessTarget;
     });
   }, [chunks, filterMode, searchQuery, showOnlyProcessingTarget]);
+  const singingChunks = useMemo(() => chunks.filter((chunk) => chunk.content_type === 'singing'), [chunks]);
+  const areAllSingingSelected = useMemo(
+    () => singingChunks.length > 0 && singingChunks.every((chunk) => chunk.should_process),
+    [singingChunks],
+  );
 
   const togglePlayback = (e: React.MouseEvent, chunk: Chunk) => {
     e.stopPropagation();
@@ -158,6 +163,23 @@ const DetailView: React.FC = () => {
       alert('処理開始に失敗しました。');
     } finally {
       setIsStartingProcessing(false);
+    }
+  };
+
+  const toggleSingingSelection = async () => {
+    if (!profile) return;
+    const nextValue = !areAllSingingSelected;
+    const singingChunkIds = new Set(singingChunks.map((chunk) => chunk.id));
+    const updatedRecordings = profile.recordings.map((r) => ({
+      ...r,
+      chunks: r.chunks.map((c) => (singingChunkIds.has(c.id) ? { ...c, should_process: nextValue } : c)),
+    }));
+    setProfile({ ...profile, recordings: updatedRecordings });
+
+    try {
+      await Promise.all(singingChunks.map((chunk) => updateChunk(chunk.id, { should_process: nextValue })));
+    } catch (err) {
+      console.error('Failed to bulk update singing chunks', err);
     }
   };
 
@@ -261,6 +283,16 @@ const DetailView: React.FC = () => {
             {recording?.status === 'awaiting_selection' && (
               <span className="text-xs text-amber-200">チャンク分割が完了しました。処理対象を選んで処理を開始してください。</span>
             )}
+            <button
+              onClick={toggleSingingSelection}
+              disabled={singingChunks.length === 0}
+              className={cn(
+                'rounded-lg px-3 py-1.5 text-sm font-semibold text-white',
+                singingChunks.length === 0 ? 'cursor-not-allowed bg-slate-600' : 'bg-fuchsia-600 hover:bg-fuchsia-500',
+              )}
+            >
+              {areAllSingingSelected ? '🎵 推測唄チャンクを一括解除' : '🎵 推測唄チャンクのみ選択'}
+            </button>
           </div>
         </section>
 
@@ -286,6 +318,9 @@ const DetailView: React.FC = () => {
                       <span className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-xs">{formatTimestamp(chunk.start_time)}</span>
                       {singing ? <span className="inline-flex items-center gap-1 rounded-full bg-fuchsia-500/20 px-2 py-0.5 text-xs text-fuchsia-200"><Music2 size={12} /> Singing</span> : <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/20 px-2 py-0.5 text-xs text-sky-200"><MessageSquare size={12} /> Speech</span>}
                       <span className="truncate">{chunk.transcript.slice(0, 48)}{chunk.transcript.length > 48 ? '…' : ''}</span>
+                    </div>
+                    <div className="mt-2" onClick={(e) => e.stopPropagation()}>
+                      <audio src={getAudioUrl(chunk.file_path)} controls preload="none" className="h-8 w-full" />
                     </div>
                   </div>
 
